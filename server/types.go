@@ -486,3 +486,10 @@ type webManifestIcon struct {
 	Sizes string `json:"sizes"`
 	Type  string `json:"type"`
 }
+
+// gapWindow is how far back replays for one topic reach after a peer reported a delivery gap,
+// and when that stops applying (see Server.handleDeliveryGap)
+type gapWindow struct {
+	since   int64
+	expires int64
+}

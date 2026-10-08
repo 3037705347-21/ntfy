@@ -11,9 +11,8 @@ import (
 )
 
 const (
-	// gapReplayMaxAge is how old a peer's delivery gap may be for this node to replay it
-	// itself; past that the subscribers are closed and their clients replay instead
-	gapReplayMaxAge = 5 * time.Minute
+	// gapWindowDuration is how long a reported delivery gap keeps widening that topic's replays
+	gapWindowDuration = 5 * time.Minute
 
 	// replayMargin is added to the cache batch timeout and the fan-out linger to cover replica lag
 	replayMargin = time.Second
@@ -49,56 +48,75 @@ func (s *Server) deliverFromBus(m *model.Message) {
 }
 
 // handleDeliveryGap repairs what a peer could not deliver to this node (see cluster.GapFunc).
-// A dated report is replayed here, from the position the peer lost, because the clients' own
-// since= markers cannot ask for it: an independent newer message on the same topic may already
-// have moved a marker past the hole. Undated reports (a peer on an older build), "every topic",
-// and gaps older than gapReplayMaxAge close the subscribers instead, because there the clients'
-// markers are the better source of truth.
+// The subscribers of those topics are closed, so their clients reconnect and replay with since=,
+// which is what every ntfy client already does.
+//
+// Their own markers are not enough, though: an independent newer message on the same topic may
+// have arrived in the meantime (from this node, or from another peer), leaving the marker past
+// the hole, where neither its time nor its row id can reach back. So a dated report also opens a
+// gap window for those topics, and while it is open this node serves since= from the gap's own
+// position (see widenSince). The close waits for replayDelay first, because the lost messages
+// were accepted on the peer and are still in its cache write batch.
 func (s *Server) handleDeliveryGap(topics []string, since int64) {
-	if since <= 0 || slices.Contains(topics, cluster.GapAllTopics) || time.Since(time.Unix(since, 0)) > gapReplayMaxAge {
-		log.Tag(tagCluster).Info("Closing the subscribers of %d gapped topic(s), so their clients replay", len(topics))
-		s.closeGappedSubscribers(topics)
-		return
+	if since > 0 && !slices.Contains(topics, cluster.GapAllTopics) {
+		s.openGapWindow(topics, since)
 	}
-	log.Tag(tagCluster).Info("Replaying %d gapped topic(s) from %v", len(topics), time.Unix(since, 0).Format(time.RFC3339))
-	go s.replayDeliveryGap(topics, since) // The peer's report must not wait for the replay
+	log.Tag(tagCluster).Info("Closing the subscribers of %d gapped topic(s) in %v, so their clients replay", len(topics), s.replayDelay)
+	time.AfterFunc(s.replayDelay, func() {
+		if !s.stopped.Load() {
+			s.closeGappedSubscribers(topics)
+		}
+	})
 }
 
-// replayDeliveryGap re-publishes a gapped range to the local subscribers of those topics, after
-// waiting for the lost messages to be readable: they were accepted on the origin node, so they
-// sit in its cache write batch for up to replayDelay. Subscribers that did receive part of the
-// range get those messages twice and dedupe by id.
-func (s *Server) replayDeliveryGap(topics []string, since int64) {
-	time.Sleep(s.replayDelay)
-	if s.stopped.Load() {
-		return
-	}
-	marker := model.NewSinceTime(since)
-	for _, id := range topics {
-		s.mu.RLock()
-		t, ok := s.topics[id]
-		s.mu.RUnlock()
-		if !ok {
-			continue // Nobody here is subscribed any more, so there is nothing to repair
+// openGapWindow remembers, per topic, the position a peer's gap started at, so replays for that
+// topic reach back to it until the window expires
+func (s *Server) openGapWindow(topics []string, since int64) {
+	expires := time.Now().Add(gapWindowDuration).Unix()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for topic, gap := range s.gapWindows { // Cheap to prune here: the map only holds gapped topics
+		if gap.expires < time.Now().Unix() {
+			delete(s.gapWindows, topic)
 		}
-		messages, err := s.messageCache.Messages(id, marker, false)
+	}
+	for _, topic := range topics {
+		if gap, ok := s.gapWindows[topic]; !ok || since < gap.since {
+			s.gapWindows[topic] = &gapWindow{since: since, expires: expires}
+		}
+	}
+}
+
+// widenSince returns the position to replay this topic from: the client's own marker, or the
+// start of a recently reported delivery gap when that is older (see handleDeliveryGap). It never
+// narrows a marker, so a client that has been away longer than the gap still gets its history.
+func (s *Server) widenSince(topicID string, since model.SinceMarker) model.SinceMarker {
+	if since.IsNone() || since.IsAll() {
+		return since // Nothing to replay, or everything already
+	}
+	s.mu.RLock()
+	gap, ok := s.gapWindows[topicID]
+	s.mu.RUnlock()
+	if !ok || gap.expires < time.Now().Unix() {
+		return since
+	}
+	if since.IsID() {
+		m, err := s.messageCache.Message(since.ID())
 		if err != nil {
-			log.Tag(tagCluster).Err(err).Field("topic", id).Warn("Cannot read back a peer's delivery gap")
-			continue
+			return since // Unknown marker: the replay falls back to the topic's history anyway
 		}
-		for _, m := range messages {
-			v := s.visitor(m.Sender, nil)
-			if err := t.Publish(v, m); err != nil {
-				logvm(v, m).Err(err).Warn("Cluster: unable to replay gapped message to local subscribers")
-				continue
-			}
-			metrics.ClusterGapsReplayed.Inc()
+		if m.Time <= gap.since {
+			return since
 		}
+	} else if !since.IsLatest() && since.Time().Unix() <= gap.since {
+		return since
 	}
+	log.Tag(tagCluster).Debug("Replaying topic %s from the gap at %v instead of the client's marker", topicID, time.Unix(gap.since, 0))
+	return model.NewSinceTime(gap.since)
 }
 
 // closeGappedSubscribers closes the subscribers of the given topics, so their clients reconnect
-// with since= and replay from their own markers
+// with since= and replay
 func (s *Server) closeGappedSubscribers(topics []string) {
 	if slices.Contains(topics, cluster.GapAllTopics) {
 		s.closeLocalSubscribers()

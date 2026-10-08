@@ -77,6 +77,7 @@ type Server struct {
 	priceCache        *util.LookupCache[map[string]int64] // Stripe price ID -> price as cents (USD implied!)
 	metricsHandler    http.Handler                        // Handles /metrics if enable-metrics set, and listen-metrics-http not set
 	replayDelay       time.Duration                       // How long until a just-published message can be read back (see server_cluster.go)
+	gapWindows        map[string]*gapWindow               // Per topic: how far back a peer's reported delivery gap reaches (see handleDeliveryGap)
 	closeChan         chan bool
 	stopOnce          sync.Once
 	stopped           atomic.Bool // Set by Stop; read by Run, which must not start listeners afterwards
@@ -336,6 +337,7 @@ func New(conf *Config) (*Server, error) {
 		messagesHistory: []int64{messages},
 		replayDelay:     conf.CacheBatchTimeout + conf.ClusterBatchLinger + replayMargin,
 		visitors:        make(map[string]*visitor),
+		gapWindows:      make(map[string]*gapWindow),
 		stripe:          stripe,
 	}
 	// Everything from here on needs the server itself: the price cache calls a method on it, and
@@ -1851,7 +1853,7 @@ func (s *Server) sendOldMessages(w http.ResponseWriter, topics []*topic, since m
 	messages := make([]*model.Message, 0)
 	truncated := false
 	for _, t := range topics {
-		topicMessages, topicTruncated, err := s.messageCache.MessagesCapped(t.ID, since, scheduled, s.config.MessagePollSizeLimit)
+		topicMessages, topicTruncated, err := s.messageCache.MessagesCapped(t.ID, s.widenSince(t.ID, since), scheduled, s.config.MessagePollSizeLimit)
 		if err != nil {
 			return err
 		}
