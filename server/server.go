@@ -76,6 +76,7 @@ type Server struct {
 	stripe            stripeAPI                           // Stripe API, can be replaced with a mock
 	priceCache        *util.LookupCache[map[string]int64] // Stripe price ID -> price as cents (USD implied!)
 	metricsHandler    http.Handler                        // Handles /metrics if enable-metrics set, and listen-metrics-http not set
+	replayDelay       time.Duration                       // How long until a just-published message can be read back (see server_cluster.go)
 	closeChan         chan bool
 	stopOnce          sync.Once
 	stopped           atomic.Bool // Set by Stop; read by Run, which must not start listeners afterwards
@@ -333,6 +334,7 @@ func New(conf *Config) (*Server, error) {
 		userManager:     userManager,
 		messages:        messages,
 		messagesHistory: []int64{messages},
+		replayDelay:     conf.CacheBatchTimeout + conf.ClusterBatchLinger + replayMargin,
 		visitors:        make(map[string]*visitor),
 		stripe:          stripe,
 	}
@@ -346,6 +348,7 @@ func New(conf *Config) (*Server, error) {
 		AdvertiseURL:    advertiseURL,
 		Secret:          conf.ClusterSecret,
 		BatchLinger:     conf.ClusterBatchLinger,
+		GapFunc:         s.handleDeliveryGap,
 		IsolatedFunc:    s.closeLocalSubscribers,
 		MaxMessageBytes: int64(conf.MessageSizeLimit)*4 + 1024, // Envelope overhead over the raw message
 	}, pool, s.deliverFromBus)
