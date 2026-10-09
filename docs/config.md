@@ -2496,6 +2496,7 @@ OPTIONS:
    --keepalive-interval value, --keepalive_interval value, -k value                                                       interval of keepalive messages (default: "45s") [$NTFY_KEEPALIVE_INTERVAL]
    --manager-interval value, --manager_interval value, -m value                                                           interval of for message pruning and stats printing (default: "1m") [$NTFY_MANAGER_INTERVAL]
    --disallowed-topics value, --disallowed_topics value [ --disallowed-topics value, --disallowed_topics value ]          topics that are not allowed to be used [$NTFY_DISALLOWED_TOPICS]
+   --topic-aliases value, --topic_aliases value [ --topic-aliases value, --topic_aliases value ]                                  maps old/alias topic names to their current canonical topic, e.g. old-topic=current-topic; publishing or subscribing via an alias is equivalent to the canonical topic [$NTFY_TOPIC_ALIASES]
    --web-root value, --web_root value                                                                                     sets root of the web app (e.g. /, or /app), or disables it (disable) (default: "/") [$NTFY_WEB_ROOT]
    --enable-signup, --enable_signup                                                                                       allows users to sign up via the web app, or API (default: false) [$NTFY_ENABLE_SIGNUP]
    --enable-login, --enable_login                                                                                         allows users to log in via the web app, or API (default: false) [$NTFY_ENABLE_LOGIN]

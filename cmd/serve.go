@@ -68,6 +68,7 @@ var flagsServe = append(
 	altsrc.NewStringFlag(&cli.StringFlag{Name: "keepalive-interval", Aliases: []string{"keepalive_interval", "k"}, EnvVars: []string{"NTFY_KEEPALIVE_INTERVAL"}, Value: util.FormatDuration(server.DefaultKeepaliveInterval), Usage: "interval of keepalive messages"}),
 	altsrc.NewStringFlag(&cli.StringFlag{Name: "manager-interval", Aliases: []string{"manager_interval", "m"}, EnvVars: []string{"NTFY_MANAGER_INTERVAL"}, Value: util.FormatDuration(server.DefaultManagerInterval), Usage: "interval of for message pruning and stats printing"}),
 	altsrc.NewStringSliceFlag(&cli.StringSliceFlag{Name: "disallowed-topics", Aliases: []string{"disallowed_topics"}, EnvVars: []string{"NTFY_DISALLOWED_TOPICS"}, Usage: "topics that are not allowed to be used"}),
+	altsrc.NewStringSliceFlag(&cli.StringSliceFlag{Name: "topic-aliases", Aliases: []string{"topic_aliases"}, EnvVars: []string{"NTFY_TOPIC_ALIASES"}, Usage: "maps old/alias topic names to their current canonical topic, e.g. old-topic=current-topic; publishing or subscribing via an alias is equivalent to the canonical topic"}),
 	altsrc.NewStringFlag(&cli.StringFlag{Name: "web-root", Aliases: []string{"web_root"}, EnvVars: []string{"NTFY_WEB_ROOT"}, Value: "/", Usage: "sets root of the web app (e.g. /, or /app), or disables it (disable)"}),
 	altsrc.NewBoolFlag(&cli.BoolFlag{Name: "enable-signup", Aliases: []string{"enable_signup"}, EnvVars: []string{"NTFY_ENABLE_SIGNUP"}, Value: false, Usage: "allows users to sign up via the web app, or API"}),
 	altsrc.NewBoolFlag(&cli.BoolFlag{Name: "enable-login", Aliases: []string{"enable_login"}, EnvVars: []string{"NTFY_ENABLE_LOGIN"}, Value: false, Usage: "allows users to log in via the web app, or API"}),
@@ -194,6 +195,7 @@ func execServe(c *cli.Context) error {
 	keepaliveIntervalStr := c.String("keepalive-interval")
 	managerIntervalStr := c.String("manager-interval")
 	disallowedTopics := c.StringSlice("disallowed-topics")
+	topicAliasesRaw := c.StringSlice("topic-aliases")
 	webRoot := c.String("web-root")
 	enableSignup := c.Bool("enable-signup")
 	enableLogin := c.Bool("enable-login")
@@ -497,6 +499,13 @@ func execServe(c *cli.Context) error {
 		}
 	}
 
+	// Parse topic aliases ("old=current"); semantic validation (reserved names, chains) runs
+	// when the server starts
+	topicAliases, err := server.ParseTopicAliases(topicAliasesRaw)
+	if err != nil {
+		return err
+	}
+
 	// Add default forbidden topics
 	disallowedTopics = append(disallowedTopics, server.DefaultDisallowedTopics...)
 
@@ -531,6 +540,7 @@ func execServe(c *cli.Context) error {
 	conf.KeepaliveInterval = keepaliveInterval
 	conf.ManagerInterval = managerInterval
 	conf.DisallowedTopics = disallowedTopics
+	conf.TopicAliases = topicAliases
 	conf.WebRoot = webRoot
 	conf.UpstreamBaseURL = upstreamBaseURL
 	conf.UpstreamAccessToken = upstreamAccessToken

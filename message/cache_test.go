@@ -666,6 +666,61 @@ func TestStore_ExpireMessages(t *testing.T) {
 	})
 }
 
+func TestStore_RenameTopic(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, s *message.Cache) {
+		// Messages cached under the alias ("old"), under the canonical topic ("new"),
+		// and under an unrelated topic
+		old1 := model.NewDefaultMessage("old", "old message 1")
+		old1.Time = 10
+		old2 := model.NewDefaultMessage("old", "old message 2")
+		old2.Time = 30
+		new1 := model.NewDefaultMessage("new", "new message 1")
+		new1.Time = 20
+		other := model.NewDefaultMessage("other", "unrelated")
+		other.Time = 25
+		require.Nil(t, s.AddMessage(old1))
+		require.Nil(t, s.AddMessage(new1))
+		require.Nil(t, s.AddMessage(other))
+		require.Nil(t, s.AddMessage(old2))
+
+		// Merge the alias history into the canonical topic
+		moved, err := s.RenameTopic("old", "new")
+		require.Nil(t, err)
+		require.Equal(t, int64(2), moved)
+
+		// The canonical topic now holds all three messages in time order, the alias is empty,
+		// and the unrelated topic is untouched
+		messages, err := s.Messages("new", model.SinceAllMessages, false)
+		require.Nil(t, err)
+		require.Equal(t, []string{"old message 1", "new message 1", "old message 2"}, []string{
+			messages[0].Message, messages[1].Message, messages[2].Message,
+		})
+		for _, m := range messages {
+			require.Equal(t, "new", m.Topic)
+		}
+		messages, err = s.Messages("old", model.SinceAllMessages, false)
+		require.Nil(t, err)
+		require.Equal(t, 0, len(messages))
+		messages, err = s.Messages("other", model.SinceAllMessages, false)
+		require.Nil(t, err)
+		require.Equal(t, 1, len(messages))
+		require.Equal(t, "unrelated", messages[0].Message)
+
+		// The migration is idempotent: re-running (restart, another cluster node) moves nothing
+		moved, err = s.RenameTopic("old", "new")
+		require.Nil(t, err)
+		require.Equal(t, int64(0), moved)
+		messages, err = s.Messages("new", model.SinceAllMessages, false)
+		require.Nil(t, err)
+		require.Equal(t, 3, len(messages))
+
+		// The migrated rows no longer show up under the alias in the topic listing
+		topics, err := s.Topics()
+		require.Nil(t, err)
+		require.ElementsMatch(t, []string{"new", "other"}, topics)
+	})
+}
+
 func TestStore_MarkAttachmentsDeleted(t *testing.T) {
 	forEachBackend(t, func(t *testing.T, s *message.Cache) {
 		// Add a message with an expired attachment (file needs cleanup)

@@ -49,6 +49,7 @@ type queries struct {
 	selectScheduledMessageIDsBySeqID string
 	deleteScheduledBySequenceID      string
 	updateMessagesForTopicExpiry     string
+	updateMessagesTopic              string
 	selectMessagesByID               string
 	selectMessagesSinceTime          string
 	selectMessagesSinceTimeScheduled string
@@ -439,6 +440,22 @@ func (c *Cache) ExpireMessages(topics ...string) error {
 		}
 		return nil
 	})
+}
+
+// RenameTopic moves all cached messages (including scheduled messages and tombstones) from one
+// topic to another, returning the number of migrated rows. It merges an alias topic's retained
+// history into its canonical topic at server startup. The update is idempotent: migrated rows
+// carry the new topic afterwards, so running it again (e.g. a restart, or another cluster node
+// sharing the database) moves nothing and never duplicates a message. Attachments are keyed by
+// message ID and are not affected.
+func (c *Cache) RenameTopic(from, to string) (int64, error) {
+	c.maybeLock()
+	defer c.maybeUnlock()
+	result, err := c.db.Exec(c.queries.updateMessagesTopic, to, from)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 // MarkExpiredAttachmentsDeleted marks up to `limit` expired attachments as deleted in a single

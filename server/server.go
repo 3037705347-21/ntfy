@@ -187,6 +187,9 @@ const (
 // New instantiates a new Server. It creates the cache and adds a Firebase
 // subscriber (if configured).
 func New(conf *Config) (*Server, error) {
+	if err := validateTopicAliases(conf.TopicAliases, conf.DisallowedTopics); err != nil {
+		return nil, err
+	}
 	var sender mail.Sender
 	if conf.SMTPSenderAddr != "" {
 		sender = mail.NewSender(&mail.Config{
@@ -225,6 +228,12 @@ func New(conf *Config) (*Server, error) {
 	}
 	messageCache, err := createMessageCache(conf, pool)
 	if err != nil {
+		return nil, err
+	}
+	// Merge retained messages cached under alias topics into their canonical topics before
+	// hydrating the in-memory topic map. Idempotent: safe to run on every startup and on every
+	// node of a cluster sharing the database.
+	if err := migrateTopicAliases(messageCache, conf.TopicAliases); err != nil {
 		return nil, err
 	}
 	var wp *webpush.Store
@@ -1949,11 +1958,22 @@ func (s *Server) sequenceIDFromPath(path string) (string, *errHTTP) {
 // topicsFromIDs returns the topics with the given IDs, creating them if they don't exist.
 // If v is non-nil, its per-visitor topic-creation rate limiter is consulted before each new
 // insertion into the in-memory topic map. Pass nil to bypass the limit (internal use only).
+//
+// Alias topic names (config "topic-aliases") are resolved to their canonical topic here, so this
+// is the single chokepoint that makes publishing and subscribing via an alias equivalent to the
+// canonical topic. Duplicate IDs after resolution (e.g. subscribing to "alias,canonical") are
+// collapsed so a subscriber does not receive each message twice.
 func (s *Server) topicsFromIDs(v *visitor, ids ...string) ([]*topic, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	topics := make([]*topic, 0)
+	topics := make([]*topic, 0, len(ids))
+	seen := make(map[string]bool)
 	for _, id := range ids {
+		id = s.canonicalTopicID(id)
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
 		if util.Contains(s.config.DisallowedTopics, id) {
 			return nil, errHTTPBadRequestTopicDisallowed
 		}

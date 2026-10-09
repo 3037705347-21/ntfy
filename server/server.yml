@@ -312,6 +312,24 @@
 #
 # disallowed-topics:
 
+# Maps old (alias) topic names to their current canonical topic name, as "old-name=new-name".
+# Publishing or subscribing via an alias behaves exactly like the canonical topic, for both
+# HTTP(S) and e-mail publishing. Messages already cached under an alias are merged into the
+# canonical topic once at startup; the merge is idempotent, so restarts and cluster nodes
+# sharing a database neither lose nor duplicate messages.
+#
+# Mappings are flat (an alias cannot point at another alias), do not support wildcards, and
+# access control is applied against the canonical topic name. Removing a mapping later leaves
+# the merged history in the canonical topic; the old name simply becomes an independent topic
+# again.
+#
+# Example:
+#   topic-aliases:
+#     - old-alerts=alerts
+#     - project-x=projects
+#
+# topic-aliases:
+
 # Defines the root path of the web app, or disables the web app entirely.
 #
 # Can be any simple path, e.g. "/", "/app", or "/ntfy". For backwards-compatibility reasons,

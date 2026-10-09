@@ -163,7 +163,8 @@ type Config struct {
 	ManagerInterval                      time.Duration
 	ManagerBatchSize                     int
 	DisallowedTopics                     []string
-	WebRoot                              string // empty to disable
+	TopicAliases                         map[string]string // Alias (old) topic name -> canonical topic name; requests and cached history of an alias are treated as the canonical topic
+	WebRoot                              string            // empty to disable
 	DelayedSenderInterval                time.Duration
 	FirebaseKeepaliveInterval            time.Duration
 	FirebasePollInterval                 time.Duration
@@ -281,6 +282,7 @@ func NewConfig() *Config {
 		ManagerInterval:                      DefaultManagerInterval,
 		ManagerBatchSize:                     DefaultManagerBatchSize,
 		DisallowedTopics:                     DefaultDisallowedTopics,
+		TopicAliases:                         make(map[string]string),
 		WebRoot:                              "/",
 		DelayedSenderInterval:                DefaultDelayedSenderInterval,
 		FirebaseKeepaliveInterval:            DefaultFirebaseKeepaliveInterval,
