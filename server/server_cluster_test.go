@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -469,4 +470,210 @@ func TestServer_Cluster_SinceIDReplaysWithOverlapInACluster(t *testing.T) {
 	messages := toMessages(t, request(t, clustered, "GET", "/mytopic/json?poll=1&since="+marker.ID, "", nil).Body.String())
 	require.Len(t, messages, 2)
 	require.Equal(t, "published first, flushed last", messages[0].Message)
+}
+
+// breakable is a cluster listener whose peer API can be made to reject everything, which is what
+// a peer sees while a node restarts (the 74ms window between registering and listening) or is
+// otherwise unreachable: the batch is refused, and the origin records a gap.
+type breakable struct {
+	handler http.Handler
+	broken  atomic.Bool
+}
+
+func (b *breakable) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if b.broken.Load() {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		return
+	}
+	b.handler.ServeHTTP(w, r)
+}
+
+// clusterNode is one full server in a test cluster, with its peer API on a real loopback listener
+type clusterNode struct {
+	*Server
+	peerAPI *breakable
+}
+
+// newTestClusterNode starts a full server as a cluster member on a shared schema, serving its
+// peer API on loopback. Fan-out lingers briefly so the tests run fast; the heartbeat (3s) is the
+// real one, so a gap report takes up to one heartbeat to reach its peer.
+func newTestClusterNode(t *testing.T, schemaDSN, nodeID string) *clusterNode {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.Nil(t, err)
+	conf := newTestConfig(t, schemaDSN)
+	conf.ClusterNodeID = nodeID
+	conf.ClusterListen = listener.Addr().String()
+	conf.ClusterSecret = "s3cret"
+	conf.ClusterAdvertiseURL = "http://" + listener.Addr().String()
+	conf.ClusterBatchLinger = 50 * time.Millisecond
+	s := newTestServer(t, conf)
+	peerAPI := &breakable{handler: s.cluster}
+	srv := &http.Server{Handler: peerAPI}
+	go srv.Serve(listener)
+	t.Cleanup(func() { srv.Close() })
+	return &clusterNode{Server: s, peerAPI: peerAPI}
+}
+
+// newTestCluster starts three nodes on one schema and waits until each sees the other two
+func newTestCluster(t *testing.T) (a, b, c *clusterNode) {
+	schemaDSN := dbtest.CreateTestPostgresSchema(t)
+	a, b, c = newTestClusterNode(t, schemaDSN, "node-a"), newTestClusterNode(t, schemaDSN, "node-b"), newTestClusterNode(t, schemaDSN, "node-c")
+	for _, n := range []*clusterNode{a, b, c} {
+		waitFor(t, func() bool { return len(n.cluster.Members()) == 3 })
+	}
+	return a, b, c
+}
+
+// streamClient is a subscriber connected to one node, the way a phone holds a stream open
+type streamClient struct {
+	mu       sync.Mutex
+	received []*model.Message
+	closed   atomic.Bool
+}
+
+func subscribeStream(t *testing.T, n *clusterNode, topic string) *streamClient {
+	c := &streamClient{}
+	topics, err := n.topicsFromIDs(nil, topic)
+	require.Nil(t, err)
+	topics[0].Subscribe(func(_ *visitor, m *model.Message) error {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		c.received = append(c.received, m)
+		return nil
+	}, "", func() { c.closed.Store(true) })
+	return c
+}
+
+func (c *streamClient) ids() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	ids := make([]string, 0, len(c.received))
+	for _, m := range c.received {
+		ids = append(ids, m.ID)
+	}
+	return ids
+}
+
+func (c *streamClient) has(id string) bool {
+	return slices.Contains(c.ids(), id)
+}
+
+// waitForReplay waits long enough for a gap report (one heartbeat) plus the replay delay
+func waitForReplay(t *testing.T, f func() bool) {
+	waitForWithMaxWait(t, 15*time.Second, f)
+}
+
+func publishOn(t *testing.T, n *clusterNode, path, body string) *model.Message {
+	response := request(t, n.Server, "PUT", path, body, nil)
+	require.Equal(t, 200, response.Code)
+	return toMessage(t, response.Body.String())
+}
+
+func TestServer_Cluster3_LostBatchIsReplayedOntoTheOpenConnection(t *testing.T) {
+	// Node B's peer API is down (a restart) while A publishes. The batch is refused, nothing
+	// newer follows, and B's subscriber still gets the message, on the connection it has.
+	a, b, _ := newTestCluster(t)
+	phone := subscribeStream(t, b, "alerts")
+	b.peerAPI.broken.Store(true)
+	lost := publishOn(t, a, "/alerts", "sent while B was restarting")
+	time.Sleep(500 * time.Millisecond) // Let the batch fail
+	b.peerAPI.broken.Store(false)
+
+	waitForReplay(t, func() bool { return phone.has(lost.ID) })
+	require.False(t, phone.closed.Load(), "the subscriber must not be closed")
+}
+
+func TestServer_Cluster3_LostBatchThenNewerFromAnotherNodeInTheSameSecond(t *testing.T) {
+	// The case a client's own marker can never repair: A's message to B is lost, C's message on
+	// the same topic arrives right after, in the same second. The subscriber on B must end up
+	// with both, the lost one replayed after the newer one.
+	a, b, c := newTestCluster(t)
+	phone := subscribeStream(t, b, "alerts")
+	b.peerAPI.broken.Store(true)
+	lost := publishOn(t, a, "/alerts", "from A, lost")
+	time.Sleep(500 * time.Millisecond)
+	b.peerAPI.broken.Store(false)
+	newer := publishOn(t, c, "/alerts", "from C, delivered")
+	waitFor(t, func() bool { return phone.has(newer.ID) })
+	require.False(t, phone.has(lost.ID)) // Live delivery really did miss it
+
+	waitForReplay(t, func() bool { return phone.has(lost.ID) })
+	ids := phone.ids()
+	require.Greater(t, slices.Index(ids, lost.ID), slices.Index(ids, newer.ID), "the lost message arrives after the newer one")
+	require.False(t, phone.closed.Load())
+}
+
+func TestServer_Cluster3_LostBatchThenNewerSecondsLater(t *testing.T) {
+	// Same, with the newer message well after the lost one, so the two are not in the same second
+	a, b, c := newTestCluster(t)
+	phone := subscribeStream(t, b, "alerts")
+	b.peerAPI.broken.Store(true)
+	lost := publishOn(t, a, "/alerts", "from A, lost")
+	time.Sleep(500 * time.Millisecond)
+	b.peerAPI.broken.Store(false)
+	time.Sleep(2 * time.Second)
+	newer := publishOn(t, c, "/alerts", "from C, two seconds later")
+	waitFor(t, func() bool { return phone.has(newer.ID) })
+
+	waitForReplay(t, func() bool { return phone.has(lost.ID) })
+	require.False(t, phone.closed.Load())
+}
+
+func TestServer_Cluster3_EditedMessageKeepsItsNewestVersion(t *testing.T) {
+	// v1 of an edited message is lost on the way to B, v2 (same sequence id) comes through C.
+	// The replay must not hand B's subscriber v1: the clients keep whichever version they stored
+	// last, so v1 after v2 would show the stale text.
+	a, b, c := newTestCluster(t)
+	phone := subscribeStream(t, b, "alerts")
+	b.peerAPI.broken.Store(true)
+	v1 := publishOn(t, a, "/alerts/seq-1", "first draft")
+	time.Sleep(500 * time.Millisecond)
+	b.peerAPI.broken.Store(false)
+	v2 := publishOn(t, c, "/alerts/seq-1", "final text")
+	require.Equal(t, v1.SequenceID, v2.SequenceID)
+	waitFor(t, func() bool { return phone.has(v2.ID) })
+
+	// The replay runs after the report (one heartbeat) and the replay delay; give it time to go
+	// wrong, then check v1 never arrived
+	time.Sleep(6 * time.Second)
+	require.False(t, phone.has(v1.ID), "the stale version must not be replayed")
+	require.True(t, phone.has(v2.ID))
+}
+
+func TestServer_Cluster3_ClientReconnectsToAnotherNodeAfterTheGap(t *testing.T) {
+	// B's subscriber got C's message live while A's was lost, then dropped off before the replay
+	// reached it and came back through the load balancer on C, with the newer message as its
+	// marker. In a cluster since=<id> replays by time with overlap, so C hands it the lost one.
+	a, b, c := newTestCluster(t)
+	phone := subscribeStream(t, b, "alerts")
+	b.peerAPI.broken.Store(true)
+	lost := publishOn(t, a, "/alerts", "from A, lost")
+	time.Sleep(500 * time.Millisecond)
+	b.peerAPI.broken.Store(false)
+	newer := publishOn(t, c, "/alerts", "from C, delivered")
+	waitFor(t, func() bool { return phone.has(newer.ID) })
+
+	messages := toMessages(t, request(t, c.Server, "GET", "/alerts/json?poll=1&since="+newer.ID, "", nil).Body.String())
+	ids := make([]string, 0, len(messages))
+	for _, m := range messages {
+		ids = append(ids, m.ID)
+	}
+	require.Contains(t, ids, lost.ID)
+}
+
+func TestServer_Cluster3_ReconnectCoversOutOfOrderRowIDs(t *testing.T) {
+	// No failure at all: X is published on A and Y on C right after, so X has the lower row id.
+	// A client that saw Y but dropped off before X's fan-out reached it reconnects with since=Y.
+	// Row-id replay would skip X; the cluster replays by time with overlap instead.
+	a, b, c := newTestCluster(t)
+	x := publishOn(t, a, "/alerts", "X, lower row id")
+	y := publishOn(t, c, "/alerts", "Y, the marker")
+	waitFor(t, func() bool {
+		stored, err := b.messageCache.Message(x.ID)
+		return err == nil && stored != nil
+	})
+
+	messages := toMessages(t, request(t, b.Server, "GET", "/alerts/json?poll=1&since="+y.ID, "", nil).Body.String())
+	require.Len(t, messages, 2) // X, and Y again (the overlap), which the client drops by id
+	require.Equal(t, x.ID, messages[0].ID)
 }
