@@ -129,6 +129,7 @@
     { key: "smtp-server-listen", env: "NTFY_SMTP_SERVER_LISTEN", section: "smtp-in" },
     { key: "smtp-server-domain", env: "NTFY_SMTP_SERVER_DOMAIN", section: "smtp-in" },
     { key: "smtp-server-addr-prefix", env: "NTFY_SMTP_SERVER_ADDR_PREFIX", section: "smtp-in" },
+    { key: "smtp-server-alias-file", env: "NTFY_SMTP_SERVER_ALIAS_FILE", section: "smtp-in" },
     { key: "upstream-base-url", env: "NTFY_UPSTREAM_BASE_URL", section: "upstream" }
   ];
 

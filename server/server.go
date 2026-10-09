@@ -61,6 +61,7 @@ type Server struct {
 	unixListener      net.Listener
 	smtpServer        *smtp.Server
 	smtpServerBackend *smtpBackend
+	smtpAliases       *smtpAliasStore // Hot-reloaded recipient-address -> topic mapping; nil when disabled
 	mailer            mail.Sender
 	topics            map[string]*topic
 	visitors          map[string]*visitor // ip:<ip> or user:<user>
@@ -532,6 +533,9 @@ func (s *Server) stop() {
 	}
 	if s.smtpServer != nil {
 		s.smtpServer.Close()
+	}
+	if s.smtpAliases != nil {
+		s.smtpAliases.Close()
 	}
 	if s.attachment != nil {
 		s.attachment.Close()
@@ -1999,7 +2003,10 @@ func (s *Server) topicsFromPattern(pattern string) ([]*topic, error) {
 }
 
 func (s *Server) runSMTPServer() error {
-	s.smtpServerBackend = newMailBackend(s.config, s.handle)
+	if s.config.SMTPServerAliasFile != "" {
+		s.smtpAliases = newSMTPAliasStore(s.config.SMTPServerAliasFile, s.config.SMTPServerDomain, s.config.SMTPServerAddrPrefix)
+	}
+	s.smtpServerBackend = newMailBackend(s.config, s.handle, s.smtpAliases)
 	s.smtpServer = smtp.NewServer(s.smtpServerBackend)
 	s.smtpServer.Addr = s.config.SMTPServerListen
 	s.smtpServer.Domain = s.config.SMTPServerDomain

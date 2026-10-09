@@ -1444,11 +1444,15 @@ what's up
 type smtpHandlerFunc func(http.ResponseWriter, *http.Request)
 
 func newTestSMTPServer(t *testing.T, handler smtpHandlerFunc) (s *smtp.Server, c net.Conn, conf *Config, scanner *bufio.Scanner) {
+	return newTestSMTPServerWithAliases(t, handler, nil)
+}
+
+func newTestSMTPServerWithAliases(t *testing.T, handler smtpHandlerFunc, aliases *smtpAliasStore) (s *smtp.Server, c net.Conn, conf *Config, scanner *bufio.Scanner) {
 	conf = newTestConfig(t, "")
 	conf.SMTPServerListen = ":25"
 	conf.SMTPServerDomain = "ntfy.sh"
 	conf.SMTPServerAddrPrefix = "ntfy-"
-	backend := newMailBackend(conf, handler)
+	backend := newMailBackend(conf, handler, aliases)
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)

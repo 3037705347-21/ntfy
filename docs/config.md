@@ -376,6 +376,10 @@ This generator helps you configure your self-hosted ntfy instance. It's not full
 <label>Address prefix</label>
 <input type="text" data-key="smtp-server-addr-prefix" placeholder="ntfy-">
 </div>
+<div class="cg-field">
+<label>Recipient alias file</label>
+<input type="text" data-key="smtp-server-alias-file" placeholder="/etc/ntfy/smtp-aliases.yml">
+</div>
 </div>
 </div>
 <div class="cg-panel" id="cg-panel-database">
@@ -1163,6 +1167,48 @@ to include an access token in the "To" address, such as `email-alerts+tk_AbC123d
 
 If the internal service lets you use define an email "Subject", it will become the title of the notification.
 The body of the email will become the message of the notification.
+
+### Fixed recipient address aliases
+By default, the recipient address determines the topic: mail to `ntfy-disk-full@ntfy.sh` is published to the
+topic `disk-full`. Some devices and services only let you send to fixed addresses such as `alert@` that cannot
+be renamed per topic. With `smtp-server-alias-file` you can maintain a **central mapping from recipient
+addresses to topics** in a separate YAML file:
+
+=== "/etc/ntfy/server.yml"
+    ``` yaml
+    smtp-server-listen: ":25"
+    smtp-server-domain: "ntfy.sh"
+    smtp-server-addr-prefix: "ntfy-"
+    smtp-server-alias-file: "/etc/ntfy/smtp-aliases.yml"
+    ```
+
+=== "/etc/ntfy/smtp-aliases.yml"
+    ``` yaml
+    # Recipient address -> topic. Keys are the address local part; the full address form is
+    # accepted as well (alert@ntfy.sh or ntfy-alert@ntfy.sh, the configured prefix is stripped).
+    alert: ops-alerts
+    backup: nightly-backups
+    support@ntfy.sh: team-support
+    ```
+
+With this file, mail to `ntfy-alert@ntfy.sh` (or `alert@ntfy.sh`) is published to topic `ops-alerts`, instead
+of to the topic `alert`. Address matching is case-insensitive, and aliased addresses may contain characters
+that are not legal in topic names (e.g. `daily.alerts`). Multiple addresses may point at the same topic, but
+**one address cannot map to two topics**.
+
+The alias file is watched and **reloaded automatically within a few seconds** of being saved, so no restart is
+required:
+
+* Adding or changing an entry takes effect immediately.
+* Deleting an entry makes that address fall back to the default behavior (the address is parsed as a topic name).
+* Deleting the whole file clears all aliases.
+* If the file contains a conflict (the same address mapped twice, an invalid topic, a syntax error, ...),
+  **none of the file is applied**; the previously loaded mapping keeps working and an error describing the
+  problem is logged. Look for lines tagged `smtp`, e.g.
+  `SMTP alias file /etc/ntfy/smtp-aliases.yml is invalid and was NOT applied; ...`.
+
+Access tokens still work with aliases: `ntfy-alert+tk_AbC123@ntfy.sh` publishes to the aliased topic using the
+token `tk_AbC123`, just like SMTP `AUTH PLAIN`.
 
 ## Behind a proxy (TLS, etc.)
 !!! warning
@@ -2391,6 +2437,7 @@ variable before running the `ntfy` command (e.g. `export NTFY_LISTEN_HTTP=:80`).
 | `smtp-server-listen`                       | `NTFY_SMTP_SERVER_LISTEN`                       | `[ip]:port`                                         | -                 | Defines the IP address and port the SMTP server will listen on, e.g. `:25` or `1.2.3.4:25`                                                                                                                                              |
 | `smtp-server-domain`                       | `NTFY_SMTP_SERVER_DOMAIN`                       | *domain name*                                       | -                 | SMTP server e-mail domain, e.g. `ntfy.sh`                                                                                                                                                                                               |
 | `smtp-server-addr-prefix`                  | `NTFY_SMTP_SERVER_ADDR_PREFIX`                  | *string*                                            | -                 | Optional prefix for the e-mail addresses to prevent spam, e.g. `ntfy-`                                                                                                                                                                  |
+| `smtp-server-alias-file`                   | `NTFY_SMTP_SERVER_ALIAS_FILE`                   | *file path*                                         | -                 | YAML file mapping fixed recipient addresses to topics, reloaded automatically; see [fixed recipient address aliases](#fixed-recipient-address-aliases)                                                                                 |
 | `twilio-account`                           | `NTFY_TWILIO_ACCOUNT`                           | *string*                                            | -                 | Twilio account SID, e.g. AC12345beefbeef67890beefbeef122586                                                                                                                                                                             |
 | `twilio-auth-token`                        | `NTFY_TWILIO_AUTH_TOKEN`                        | *string*                                            | -                 | Twilio auth token, e.g. affebeef258625862586258625862586                                                                                                                                                                                |
 | `twilio-phone-number`                      | `NTFY_TWILIO_PHONE_NUMBER`                      | *string*                                            | -                 | Twilio outgoing phone number, e.g. +18775132586                                                                                                                                                                                         |
@@ -2509,6 +2556,7 @@ OPTIONS:
    --smtp-server-listen value, --smtp_server_listen value                                                                 SMTP server address (ip:port) for incoming emails, e.g. :25 [$NTFY_SMTP_SERVER_LISTEN]
    --smtp-server-domain value, --smtp_server_domain value                                                                 SMTP domain for incoming e-mail, e.g. ntfy.sh [$NTFY_SMTP_SERVER_DOMAIN]
    --smtp-server-addr-prefix value, --smtp_server_addr_prefix value                                                       SMTP email address prefix for topics to prevent spam (e.g. 'ntfy-') [$NTFY_SMTP_SERVER_ADDR_PREFIX]
+   --smtp-server-alias-file value, --smtp_server_alias_file value                                                         YAML file mapping fixed SMTP recipient addresses to topics, reloaded automatically (e.g. /etc/ntfy/smtp-aliases.yml); empty disables aliases [$NTFY_SMTP_SERVER_ALIAS_FILE]
    --twilio-account value, --twilio_account value                                                                         Twilio account SID, used for phone calls, e.g. AC123... [$NTFY_TWILIO_ACCOUNT]
    --twilio-auth-token value, --twilio_auth_token value                                                                   Twilio auth token [$NTFY_TWILIO_AUTH_TOKEN]
    --twilio-phone-number value, --twilio_phone_number value                                                               Twilio number to use for outgoing calls [$NTFY_TWILIO_PHONE_NUMBER]

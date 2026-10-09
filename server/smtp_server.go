@@ -46,6 +46,7 @@ const (
 type smtpBackend struct {
 	config  *Config
 	handler func(http.ResponseWriter, *http.Request)
+	aliases *smtpAliasStore // Optional fixed-recipient-address -> topic mapping, nil if disabled
 	success int64
 	failure int64
 	mu      sync.Mutex
@@ -54,10 +55,11 @@ type smtpBackend struct {
 var _ smtp.Backend = (*smtpBackend)(nil)
 var _ smtp.Session = (*smtpSession)(nil)
 
-func newMailBackend(conf *Config, handler func(http.ResponseWriter, *http.Request)) *smtpBackend {
+func newMailBackend(conf *Config, handler func(http.ResponseWriter, *http.Request), aliases *smtpAliasStore) *smtpBackend {
 	return &smtpBackend{
 		config:  conf,
 		handler: handler,
+		aliases: aliases,
 	}
 }
 
@@ -124,6 +126,13 @@ func (s *smtpSession) Rcpt(to string) error {
 			parts := strings.Split(to, "+")
 			to = parts[0]
 			token = parts[1]
+		}
+		// If a fixed recipient address is aliased to a topic, use it; otherwise the address is
+		// parsed as a topic name (default behavior). Alias file changes apply without restart.
+		if s.backend.aliases != nil {
+			if mappedTopic, ok := s.backend.aliases.topicFor(to); ok {
+				to = mappedTopic
+			}
 		}
 		if !topicRegex.MatchString(to) {
 			return errInvalidTopic

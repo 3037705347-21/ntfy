@@ -83,6 +83,7 @@ var flagsServe = append(
 	altsrc.NewStringFlag(&cli.StringFlag{Name: "smtp-server-listen", Aliases: []string{"smtp_server_listen"}, EnvVars: []string{"NTFY_SMTP_SERVER_LISTEN"}, Usage: "SMTP server address (ip:port) for incoming emails, e.g. :25"}),
 	altsrc.NewStringFlag(&cli.StringFlag{Name: "smtp-server-domain", Aliases: []string{"smtp_server_domain"}, EnvVars: []string{"NTFY_SMTP_SERVER_DOMAIN"}, Usage: "SMTP domain for incoming e-mail, e.g. ntfy.sh"}),
 	altsrc.NewStringFlag(&cli.StringFlag{Name: "smtp-server-addr-prefix", Aliases: []string{"smtp_server_addr_prefix"}, EnvVars: []string{"NTFY_SMTP_SERVER_ADDR_PREFIX"}, Usage: "SMTP email address prefix for topics to prevent spam (e.g. 'ntfy-')"}),
+	altsrc.NewStringFlag(&cli.StringFlag{Name: "smtp-server-alias-file", Aliases: []string{"smtp_server_alias_file"}, EnvVars: []string{"NTFY_SMTP_SERVER_ALIAS_FILE"}, Usage: "YAML file mapping fixed SMTP recipient addresses to topics, reloaded automatically (e.g. /etc/ntfy/smtp-aliases.yml); empty disables aliases"}),
 	altsrc.NewStringFlag(&cli.StringFlag{Name: "twilio-account", Aliases: []string{"twilio_account"}, EnvVars: []string{"NTFY_TWILIO_ACCOUNT"}, Usage: "Twilio account SID, used for phone calls, e.g. AC123..."}),
 	altsrc.NewStringFlag(&cli.StringFlag{Name: "twilio-auth-token", Aliases: []string{"twilio_auth_token"}, EnvVars: []string{"NTFY_TWILIO_AUTH_TOKEN"}, Usage: "Twilio auth token"}),
 	altsrc.NewStringFlag(&cli.StringFlag{Name: "twilio-phone-number", Aliases: []string{"twilio_phone_number"}, EnvVars: []string{"NTFY_TWILIO_PHONE_NUMBER"}, Usage: "Twilio number to use for outgoing calls"}),
@@ -209,6 +210,7 @@ func execServe(c *cli.Context) error {
 	smtpServerListen := c.String("smtp-server-listen")
 	smtpServerDomain := c.String("smtp-server-domain")
 	smtpServerAddrPrefix := c.String("smtp-server-addr-prefix")
+	smtpServerAliasFile := c.String("smtp-server-alias-file")
 	twilioAccount := c.String("twilio-account")
 	twilioAuthToken := c.String("twilio-auth-token")
 	twilioPhoneNumber := c.String("twilio-phone-number")
@@ -370,6 +372,10 @@ func execServe(c *cli.Context) error {
 		return errors.New("if smtp-sender-verify is set, smtp-sender-addr must also be set")
 	} else if smtpServerListen != "" && smtpServerDomain == "" {
 		return errors.New("if smtp-server-listen is set, smtp-server-domain must also be set")
+	} else if smtpServerAliasFile != "" && smtpServerListen == "" {
+		return errors.New("if smtp-server-alias-file is set, smtp-server-listen and smtp-server-domain must also be set")
+	} else if smtpServerAliasFile != "" && !util.FileExists(smtpServerAliasFile) {
+		return errors.New("if set, smtp-server-alias-file must exist")
 	} else if attachmentCacheDir != "" && baseURL == "" {
 		return errors.New("if attachment-cache-dir is set, base-url must also be set")
 	} else if baseURL != "" {
@@ -542,6 +548,7 @@ func execServe(c *cli.Context) error {
 	conf.SMTPServerListen = smtpServerListen
 	conf.SMTPServerDomain = smtpServerDomain
 	conf.SMTPServerAddrPrefix = smtpServerAddrPrefix
+	conf.SMTPServerAliasFile = smtpServerAliasFile
 	conf.TwilioAccount = twilioAccount
 	conf.TwilioAuthToken = twilioAuthToken
 	conf.TwilioPhoneNumber = twilioPhoneNumber

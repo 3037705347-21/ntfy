@@ -178,6 +178,7 @@ type Config struct {
 	SMTPServerListen                     string
 	SMTPServerDomain                     string
 	SMTPServerAddrPrefix                 string
+	SMTPServerAliasFile                  string // YAML file mapping fixed recipient addresses to topics; hot-reloaded, empty disables
 	TwilioAccount                        string
 	TwilioAuthToken                      string `hash:"-"`
 	TwilioPhoneNumber                    string
@@ -296,6 +297,7 @@ func NewConfig() *Config {
 		SMTPServerListen:                     "",
 		SMTPServerDomain:                     "",
 		SMTPServerAddrPrefix:                 "",
+		SMTPServerAliasFile:                  "",
 		TwilioCallsBaseURL:                   "https://api.twilio.com", // Override for tests
 		TwilioAccount:                        "",
 		TwilioAuthToken:                      "",

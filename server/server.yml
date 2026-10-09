@@ -243,11 +243,17 @@
 # - smtp-server-domain is the e-mail domain, e.g. ntfy.sh
 # - smtp-server-addr-prefix is an optional prefix for the e-mail addresses to prevent spam. If set to "ntfy-",
 #   for instance, only e-mails to ntfy-$topic@ntfy.sh will be accepted. If this is not set, all emails to
-#   $topic@ntfy.sh will be accepted (which may be a spam problem).
+#   $topic@ntfy.sh will be accepted (which may obviously be a spam problem).
+# - smtp-server-alias-file optionally points to a YAML file that maps fixed recipient addresses to topics,
+#   e.g. "alert: ops-alerts" delivers mail to alert@ntfy.sh to topic "ops-alerts". The file is reloaded
+#   automatically when it changes (no restart required): removing an entry falls back to deriving the topic
+#   from the address, and if the file contains a conflict/error, none of it is applied (an error is logged)
+#   and the previous mapping stays in effect.
 #
 # smtp-server-listen:
 # smtp-server-domain:
 # smtp-server-addr-prefix:
+# smtp-server-alias-file:
 
 # Web Push support (background notifications for browsers)
 #

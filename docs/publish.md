@@ -3425,6 +3425,11 @@ ntfy-$topic+$token@ntfy.sh
 To use [username/password](https://docs.ntfy.sh/publish/#username-password), you can use SMTP PLAIN auth when authenticating
 to the ntfy server.
 
+If a device or service can only send to fixed recipient addresses such as `alert@ntfy.sh` (instead of topic-named
+addresses), the server admin can map those addresses to topics in a hot-reloaded alias file via
+[`smtp-server-alias-file`](config.md#fixed-recipient-address-aliases). Mail to `alert@ntfy.sh` then lands on the
+configured topic, and removing the alias reverts the address back to normal topic parsing.
+
 As of today, e-mail publishing only supports adding a [message title](#message-title) (the e-mail subject). Tags, priority,
 delay and other features are not supported (yet). Here's an example that will publish a message with the 
 title `You've Got Mail` to topic `sometopic` (see [ntfy.sh/sometopic](https://ntfy.sh/sometopic)):
