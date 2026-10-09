@@ -445,3 +445,17 @@ func TestServer_Cluster_UndatedAndAllTopicsGapsOnlyClose(t *testing.T) {
 	require.Empty(t, s.gapWindows)
 	s.mu.RUnlock()
 }
+
+func TestServer_Cluster_GapWindowLastsAsLongAsTheCache(t *testing.T) {
+	// A dozing phone or a half-hourly poller may not come back for a long time after the close,
+	// and a window that has shut by then loses the message for good. The only cost of a long
+	// window is deduplicated replay, so it lasts as long as the message itself: cache-duration.
+	conf := newTestConfig(t, "")
+	conf.CacheDuration = 2 * time.Hour
+	s := newTestServer(t, conf)
+	s.handleDeliveryGap([]string{"mytopic"}, time.Now().Unix())
+	s.mu.RLock()
+	expires := s.gapWindows["mytopic"].expires
+	s.mu.RUnlock()
+	require.InDelta(t, time.Now().Add(2*time.Hour).Unix(), expires, 5)
+}

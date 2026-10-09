@@ -11,9 +11,6 @@ import (
 )
 
 const (
-	// gapWindowDuration is how long a reported delivery gap keeps widening that topic's replays
-	gapWindowDuration = 5 * time.Minute
-
 	// replayMargin is added to the cache batch timeout and the fan-out linger to cover replica lag
 	replayMargin = time.Second
 )
@@ -70,9 +67,11 @@ func (s *Server) handleDeliveryGap(topics []string, since int64) {
 }
 
 // openGapWindow remembers, per topic, the position a peer's gap started at, so replays for that
-// topic reach back to it until the window expires
+// topic reach back to it. The window lasts as long as the message does (cache-duration): a dozing
+// phone or an hourly poller may not ask for hours, and the only cost of a long window is
+// deduplicated replay on that topic.
 func (s *Server) openGapWindow(topics []string, since int64) {
-	expires := time.Now().Add(gapWindowDuration).Unix()
+	expires := time.Now().Add(s.config.CacheDuration).Unix()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for topic, gap := range s.gapWindows { // Cheap to prune here: the map only holds gapped topics
