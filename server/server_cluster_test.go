@@ -459,3 +459,22 @@ func TestServer_Cluster_GapWindowLastsAsLongAsTheCache(t *testing.T) {
 	s.mu.RUnlock()
 	require.InDelta(t, time.Now().Add(2*time.Hour).Unix(), expires, 5)
 }
+
+func TestServer_Cluster_GapWindowWidensAMarkerFromTheSameSecond(t *testing.T) {
+	// Message times have second granularity, and a burst on one topic lands several messages in
+	// the same second from different nodes. A marker whose time EQUALS the gap position is not
+	// older than the gap, so it must be widened too: the lost message can hide behind a lower row
+	// id in that same second, where since=<id> cannot see it.
+	s := newTestServer(t, newTestConfig(t, ""))
+	now := time.Now().Unix()
+	lost := model.NewDefaultMessage("alerts", "from node A, lost")
+	lost.Time = now
+	newer := model.NewDefaultMessage("alerts", "from node C, delivered")
+	newer.Time = now
+	require.Nil(t, s.messageCache.AddMessages([]*model.Message{lost, newer}))
+
+	s.handleDeliveryGap([]string{"alerts"}, now)
+	messages := toMessages(t, request(t, s, "GET", "/alerts/json?poll=1&since="+newer.ID, "", nil).Body.String())
+	require.Len(t, messages, 2)
+	require.Equal(t, "from node A, lost", messages[0].Message)
+}

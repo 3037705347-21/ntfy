@@ -87,8 +87,10 @@ func (s *Server) openGapWindow(topics []string, since int64) {
 }
 
 // widenSince returns the position to replay this topic from: the client's own marker, or the
-// start of a recently reported delivery gap when that is older (see handleDeliveryGap). It never
-// narrows a marker, so a client that has been away longer than the gap still gets its history.
+// start of a recently reported delivery gap unless the marker is older (see handleDeliveryGap).
+// It never narrows a marker, so a client that has been away longer than the gap still gets its
+// history. A marker from the gap's own second is widened: times are whole seconds, and the lost
+// message can sit in that second behind a lower row id, where since=<id> cannot see it.
 func (s *Server) widenSince(topicID string, since model.SinceMarker) model.SinceMarker {
 	if since.IsNone() || since.IsAll() {
 		return since // Nothing to replay, or everything already
@@ -104,10 +106,10 @@ func (s *Server) widenSince(topicID string, since model.SinceMarker) model.Since
 		if err != nil {
 			return since // Unknown marker: the replay falls back to the topic's history anyway
 		}
-		if m.Time <= gap.since {
-			return since
+		if m.Time < gap.since {
+			return since // Older than the gap: the marker already reaches it
 		}
-	} else if !since.IsLatest() && since.Time().Unix() <= gap.since {
+	} else if !since.IsLatest() && since.Time().Unix() < gap.since {
 		return since
 	}
 	log.Tag(tagCluster).Debug("Replaying topic %s from the gap at %v instead of the client's marker", topicID, time.Unix(gap.since, 0))
