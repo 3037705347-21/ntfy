@@ -77,7 +77,6 @@ type Server struct {
 	priceCache        *util.LookupCache[map[string]int64] // Stripe price ID -> price as cents (USD implied!)
 	metricsHandler    http.Handler                        // Handles /metrics if enable-metrics set, and listen-metrics-http not set
 	replayDelay       time.Duration                       // How long until a just-published message can be read back (see server_cluster.go)
-	gapWindows        map[string]*gapWindow               // Per topic: how far back a peer's reported delivery gap reaches (see handleDeliveryGap)
 	closeChan         chan bool
 	stopOnce          sync.Once
 	stopped           atomic.Bool // Set by Stop; read by Run, which must not start listeners afterwards
@@ -337,7 +336,6 @@ func New(conf *Config) (*Server, error) {
 		messagesHistory: []int64{messages},
 		replayDelay:     conf.CacheBatchTimeout + conf.ClusterBatchLinger + replayMargin,
 		visitors:        make(map[string]*visitor),
-		gapWindows:      make(map[string]*gapWindow),
 		stripe:          stripe,
 	}
 	// Everything from here on needs the server itself: the price cache calls a method on it, and
@@ -1852,14 +1850,11 @@ func (s *Server) sendOldMessages(w http.ResponseWriter, topics []*topic, since m
 	}
 	messages := make([]*model.Message, 0)
 	truncated := false
+	since = s.lagSince(since)
 	for _, t := range topics {
-		topicSince, widened := s.widenSince(t.ID, since)
-		topicMessages, topicTruncated, err := s.messageCache.MessagesCapped(t.ID, topicSince, scheduled, s.config.MessagePollSizeLimit)
+		topicMessages, topicTruncated, err := s.messageCache.MessagesCapped(t.ID, since, scheduled, s.config.MessagePollSizeLimit)
 		if err != nil {
 			return err
-		}
-		if widened {
-			topicMessages = newestPerSequence(topicMessages) // The client may already hold a newer version (see newestPerSequence)
 		}
 		truncated = truncated || topicTruncated
 		messages = append(messages, topicMessages...)
