@@ -86,29 +86,61 @@ const (
 )
 
 var sqliteQueries = queries{
-	insertMessages:                   sqliteInsertMessages,
-	selectScheduledMessageIDsBySeqID: sqliteSelectScheduledMessageIDsBySeqIDQuery,
-	deleteScheduledBySequenceID:      sqliteDeleteScheduledBySequenceIDQuery,
-	updateMessagesForTopicExpiry:     sqliteUpdateMessagesForTopicExpiryQuery,
-	selectMessagesByID:               sqliteSelectMessagesByIDQuery,
-	selectMessagesSinceTime:          sqliteSelectMessagesSinceTimeQuery,
-	selectMessagesSinceTimeScheduled: sqliteSelectMessagesSinceTimeIncludeScheduledQuery,
-	selectMessageRowID:               sqliteSelectMessageRowIDQuery,
-	selectMessagesSinceID:            sqliteSelectMessagesSinceIDQuery,
-	selectMessagesSinceIDScheduled:   sqliteSelectMessagesSinceIDIncludeScheduledQuery,
-	selectMessagesLatest:             sqliteSelectMessagesLatestQuery,
-	selectMessagesDue:                sqliteSelectMessagesDueQuery,
-	deleteExpiredMessages:            sqliteDeleteExpiredMessagesQuery,
-	updateMessagePublished:           sqliteUpdateMessagePublishedQuery,
-	selectMessagesCount:              sqliteSelectMessagesCountQuery,
-	selectTopics:                     sqliteSelectTopicsQuery,
-	markExpiredAttachmentsDeleted:    sqliteMarkExpiredAttachmentsDeletedQuery,
-	selectAttachmentsSizeBySender:    sqliteSelectAttachmentsSizeBySenderQuery,
-	selectAttachmentsSizeByUserID:    sqliteSelectAttachmentsSizeByUserIDQuery,
-	selectAttachmentsWithSizes:       sqliteSelectAttachmentsWithSizesQuery,
-	selectStats:                      sqliteSelectStatsQuery,
-	updateStats:                      sqliteUpdateStatsQuery,
-	updateMessageTime:                sqliteUpdateMessageTimeQuery,
+	insertMessages:                      sqliteInsertMessages,
+	selectScheduledMessageIDsBySeqID:    sqliteSelectScheduledMessageIDsBySeqIDQuery,
+	deleteScheduledBySequenceID:         sqliteDeleteScheduledBySequenceIDQuery,
+	updateMessagesForTopicExpiry:        sqliteUpdateMessagesForTopicExpiryQuery,
+	selectMessagesByID:                  sqliteSelectMessagesByIDQuery,
+	selectMessagesSinceTime:             sqliteSelectMessagesSinceTimeQuery,
+	selectMessagesSinceTimeScheduled:    sqliteSelectMessagesSinceTimeIncludeScheduledQuery,
+	selectMessageRowID:                  sqliteSelectMessageRowIDQuery,
+	selectMessagesSinceID:               sqliteSelectMessagesSinceIDQuery,
+	selectMessagesSinceIDScheduled:      sqliteSelectMessagesSinceIDIncludeScheduledQuery,
+	selectMessagesLatest:                sqliteSelectMessagesLatestQuery,
+	selectMessagesDue:                   sqliteSelectMessagesDueQuery,
+	deleteExpiredMessages:               sqliteDeleteExpiredMessagesQuery,
+	updateMessagePublished:              sqliteUpdateMessagePublishedQuery,
+	selectMessagesCount:                 sqliteSelectMessagesCountQuery,
+	selectTopics:                        sqliteSelectTopicsQuery,
+	markExpiredAttachmentsDeleted:       sqliteMarkExpiredAttachmentsDeletedQuery,
+	selectAttachmentsSizeBySender:       sqliteSelectAttachmentsSizeBySenderQuery,
+	selectAttachmentsSizeByUserID:       sqliteSelectAttachmentsSizeByUserIDQuery,
+	selectAttachmentsWithSizes:          sqliteSelectAttachmentsWithSizesQuery,
+	markExpiredAttachmentsDeletedPinned: sqliteMarkExpiredAttachmentsDeletedPinned,
+	deleteExpiredMessagesPinned:         sqliteDeleteExpiredMessagesPinned,
+	selectAttachmentsWithSizesPinned:    sqliteSelectAttachmentsWithSizesPinned,
+	selectStats:                         sqliteSelectStatsQuery,
+	updateStats:                         sqliteUpdateStatsQuery,
+	updateMessageTime:                   sqliteUpdateMessageTimeQuery,
+}
+
+// sqliteQuestionMarks returns n comma-separated "?" placeholders.
+func sqliteQuestionMarks(n int) string {
+	return strings.Repeat("?,", n-1) + "?"
+}
+
+// sqliteMarkExpiredAttachmentsDeletedPinned is the pinned variant of
+// sqliteMarkExpiredAttachmentsDeletedQuery: pinned rows are excluded even when past expiry.
+// Argument order: now, pinned..., limit.
+func sqliteMarkExpiredAttachmentsDeletedPinned(now int64, limit int, pinned []string) (string, []any) {
+	query := `UPDATE messages SET attachment_deleted = 1 WHERE mid IN (SELECT mid FROM messages WHERE attachment_expires > 0 AND attachment_expires <= ? AND attachment_deleted = 0 AND mid NOT IN (` + sqliteQuestionMarks(len(pinned)) + `) LIMIT ?)`
+	args := append([]any{now}, stringArgs(pinned)...)
+	return query, append(args, limit)
+}
+
+// sqliteDeleteExpiredMessagesPinned is the pinned variant of sqliteDeleteExpiredMessagesQuery.
+// Argument order: now, pinned..., limit.
+func sqliteDeleteExpiredMessagesPinned(now int64, limit int, pinned []string) (string, []any) {
+	query := `DELETE FROM messages WHERE mid IN (SELECT mid FROM messages WHERE expires <= ? AND published = 1 AND mid NOT IN (` + sqliteQuestionMarks(len(pinned)) + `) LIMIT ?)`
+	args := append([]any{now}, stringArgs(pinned)...)
+	return query, append(args, limit)
+}
+
+// sqliteSelectAttachmentsWithSizesPinned returns the live attachment set plus every pinned
+// attachment, regardless of expiry/deleted flag. Argument order: now, pinned...
+func sqliteSelectAttachmentsWithSizesPinned(now int64, pinned []string) (string, []any) {
+	query := `SELECT mid, attachment_size FROM messages WHERE (attachment_expires > ? AND attachment_deleted = 0) OR mid IN (` + sqliteQuestionMarks(len(pinned)) + `)`
+	return query, append([]any{now}, stringArgs(pinned)...)
 }
 
 // NewSQLiteStore creates a SQLite file-backed cache

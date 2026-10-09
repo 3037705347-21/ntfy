@@ -66,9 +66,15 @@ type queries struct {
 	selectAttachmentsSizeBySender    string
 	selectAttachmentsSizeByUserID    string
 	selectAttachmentsWithSizes       string
-	selectStats                      string
-	updateStats                      string
-	updateMessageTime                string
+	// Pinned variants of the pruning/reconciliation queries. They receive the attachment/message
+	// IDs that must be retained; those rows are excluded from expiry. Keeping these separate lets
+	// the common (no pins) path use the static query strings unchanged.
+	markExpiredAttachmentsDeletedPinned func(now int64, limit int, pinned []string) (string, []any)
+	deleteExpiredMessagesPinned         func(now int64, limit int, pinned []string) (string, []any)
+	selectAttachmentsWithSizesPinned    func(now int64, pinned []string) (string, []any)
+	selectStats                         string
+	updateStats                         string
+	updateMessageTime                   string
 }
 
 // Cache stores published messages
@@ -79,9 +85,39 @@ type Cache struct {
 	nop     bool
 	mu      *sync.Mutex // nil for PostgreSQL (concurrent writes supported), set for SQLite (single writer)
 	queries queries
-	// claimTimeout is how long this node's claim on a due message holds off the others; it is a
+	// claimTimeout is how long a node's claim on a due message holds off the others; it's a
 	// field only so tests can shorten it
 	claimTimeout time.Duration
+	// pinnedIDs returns the attachment/message IDs that must never expire. It is consulted on
+	// every prune and attachment reconciliation, so it may be backed by a hot-reloaded source.
+	// nil disables pinning.
+	pinnedIDs PinnedIDsFunc
+}
+
+// PinnedIDsFunc returns the attachment/message IDs pinned for long-term retention. The cache
+// excludes these IDs from attachment/message expiry and keeps counting their attachments as live.
+type PinnedIDsFunc func() ([]string, error)
+
+// SetPinnedIDs installs the pinned-ID provider used by the pruning queries. Pass nil to disable.
+func (c *Cache) SetPinnedIDs(f PinnedIDsFunc) {
+	c.pinnedIDs = f
+}
+
+// pinnedIDList returns the current pinned IDs, or nil when pinning is disabled.
+func (c *Cache) pinnedIDList() ([]string, error) {
+	if c.pinnedIDs == nil {
+		return nil, nil
+	}
+	return c.pinnedIDs()
+}
+
+// stringArgs converts a slice of IDs into bind arguments.
+func stringArgs(ids []string) []any {
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+	return args
 }
 
 func newCache(db *db.DB, queries queries, mu *sync.Mutex, batchSize int, batchTimeout time.Duration, nop bool) *Cache {
@@ -336,11 +372,25 @@ func (c *Cache) SetClaimTimeoutForTest(timeout time.Duration) {
 }
 
 // DeleteExpiredMessages deletes up to `limit` expired messages in a single query
-// and returns the number of deleted rows.
+// and returns the number of deleted rows. IDs returned by the pinned-ID provider are
+// retained regardless of their expiry.
 func (c *Cache) DeleteExpiredMessages(limit int) (int64, error) {
 	c.maybeLock()
 	defer c.maybeUnlock()
-	result, err := c.db.Exec(c.queries.deleteExpiredMessages, time.Now().Unix(), limit)
+	pinned, err := c.pinnedIDList()
+	if err != nil {
+		return 0, err
+	}
+	now := time.Now().Unix()
+	if len(pinned) > 0 {
+		query, args := c.queries.deleteExpiredMessagesPinned(now, limit, pinned)
+		result, err := c.db.Exec(query, args...)
+		if err != nil {
+			return 0, err
+		}
+		return result.RowsAffected()
+	}
+	result, err := c.db.Exec(c.queries.deleteExpiredMessages, now, limit)
 	if err != nil {
 		return 0, err
 	}
@@ -442,11 +492,25 @@ func (c *Cache) ExpireMessages(topics ...string) error {
 }
 
 // MarkExpiredAttachmentsDeleted marks up to `limit` expired attachments as deleted in a single
-// query and returns the number of updated rows.
+// query and returns the number of updated rows. IDs returned by the pinned-ID provider are
+// never marked deleted.
 func (c *Cache) MarkExpiredAttachmentsDeleted(limit int) (int64, error) {
 	c.maybeLock()
 	defer c.maybeUnlock()
-	result, err := c.db.Exec(c.queries.markExpiredAttachmentsDeleted, time.Now().Unix(), limit)
+	pinned, err := c.pinnedIDList()
+	if err != nil {
+		return 0, err
+	}
+	now := time.Now().Unix()
+	if len(pinned) > 0 {
+		query, args := c.queries.markExpiredAttachmentsDeletedPinned(now, limit, pinned)
+		result, err := c.db.Exec(query, args...)
+		if err != nil {
+			return 0, err
+		}
+		return result.RowsAffected()
+	}
+	result, err := c.db.Exec(c.queries.markExpiredAttachmentsDeleted, now, limit)
 	if err != nil {
 		return 0, err
 	}
@@ -474,8 +538,24 @@ func (c *Cache) AttachmentBytesUsedByUser(userID string) (int64, error) {
 // AttachmentsWithSizes returns a map of message ID to attachment size for all active
 // (non-expired, non-deleted) attachments. This is used to hydrate the attachment store's
 // size tracking on startup and during periodic sync.
+//
+// IDs returned by the pinned-ID provider are always included, even if their attachment has
+// technically expired or was marked deleted, so the attachment store never garbage-collects
+// them.
 func (c *Cache) AttachmentsWithSizes() (map[string]int64, error) {
-	rows, err := c.db.ReadOnly().Query(c.queries.selectAttachmentsWithSizes, time.Now().Unix())
+	pinned, err := c.pinnedIDList()
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now().Unix()
+	var query string
+	var args []any
+	if len(pinned) > 0 {
+		query, args = c.queries.selectAttachmentsWithSizesPinned(now, pinned)
+	} else {
+		query, args = c.queries.selectAttachmentsWithSizes, []any{now}
+	}
+	rows, err := c.db.ReadOnly().Query(query, args...)
 	if err != nil {
 		return nil, err
 	}

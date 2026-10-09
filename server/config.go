@@ -158,6 +158,7 @@ type Config struct {
 	AttachmentFileSizeLimit              int64
 	AttachmentExpiryDuration             time.Duration
 	AttachmentOrphanGracePeriod          time.Duration
+	AttachmentRetentionFile              string // Plaintext manifest of attachment IDs to pin (never auto-delete); empty disables
 	TemplateDir                          string // Directory to load named templates from
 	KeepaliveInterval                    time.Duration
 	ManagerInterval                      time.Duration

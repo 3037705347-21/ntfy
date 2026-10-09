@@ -2681,6 +2681,72 @@ func TestServer_PublishAttachmentAndExpire(t *testing.T) {
 	})
 }
 
+// TestServer_PublishAttachmentRetainedByManifest verifies end to end that an attachment ID
+// added to the retention manifest is hot-reloaded and then never auto-deleted (its download
+// link keeps working), while an unpinned attachment in the same server expires normally.
+func TestServer_PublishAttachmentRetainedByManifest(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, databaseURL string) {
+		t.Parallel()
+		pinnedContent := util.RandomString(5000) // > 4096
+		normalContent := util.RandomString(5000)
+
+		c := newTestConfig(t, databaseURL)
+		c.AttachmentExpiryDuration = time.Millisecond // Hack, like TestServer_PublishAttachmentAndExpire
+		manifestPath := filepath.Join(t.TempDir(), "retention.txt")
+		require.Nil(t, os.WriteFile(manifestPath, []byte("# empty for now\n"), 0600))
+		c.AttachmentRetentionFile = manifestPath
+		s := newTestServer(t, c)
+
+		// Pinned attachment
+		resp := request(t, s, "PUT", "/retained", pinnedContent, nil)
+		pinnedMsg := toMessage(t, resp.Body.String())
+		pinnedFile := filepath.Join(s.config.AttachmentCacheDir, pinnedMsg.ID)
+		pinnedPath := strings.TrimPrefix(pinnedMsg.Attachment.URL, "http://127.0.0.1:12345")
+		require.FileExists(t, pinnedFile)
+
+		// Unpinned attachment in the same server; it must expire normally.
+		resp = request(t, s, "PUT", "/retained", normalContent, nil)
+		normalMsg := toMessage(t, resp.Body.String())
+		normalFile := filepath.Join(s.config.AttachmentCacheDir, normalMsg.ID)
+		normalPath := strings.TrimPrefix(normalMsg.Attachment.URL, "http://127.0.0.1:12345")
+		require.FileExists(t, normalFile)
+
+		// Add only the first attachment to the manifest after publishing. The server reloads it
+		// during prune/sync, so no restart is required.
+		require.Nil(t, os.WriteFile(manifestPath, []byte("# compliance retention\n"+pinnedMsg.ID+"\n"), 0600))
+
+		// Backdate both files past the sync grace period.
+		twoHoursAgo := time.Now().Add(-2 * time.Hour)
+		require.Nil(t, os.Chtimes(pinnedFile, twoHoursAgo, twoHoursAgo))
+		require.Nil(t, os.Chtimes(normalFile, twoHoursAgo, twoHoursAgo))
+
+		// The unpinned attachment disappears on a normal prune/sync cycle ...
+		waitFor(t, func() bool {
+			s.execManager()
+			s.attachment.Sync()
+			return !util.FileExists(normalFile)
+		})
+
+		// ... while the pinned attachment and its download link keep working across cycles.
+		require.FileExists(t, pinnedFile)
+		resp = request(t, s, "GET", pinnedPath, "", nil)
+		require.Equal(t, 200, resp.Code)
+		require.Equal(t, pinnedContent, resp.Body.String())
+		resp = request(t, s, "GET", normalPath, "", nil)
+		require.Equal(t, 404, resp.Code)
+
+		// Stability: repeated prune/sync cycles must still not remove the pinned attachment.
+		for i := 0; i < 3; i++ {
+			s.execManager()
+			s.attachment.Sync()
+		}
+		require.FileExists(t, pinnedFile)
+		resp = request(t, s, "GET", pinnedPath, "", nil)
+		require.Equal(t, 200, resp.Code)
+		require.Equal(t, pinnedContent, resp.Body.String())
+	})
+}
+
 func TestServer_PublishAttachmentWithTierBasedExpiry(t *testing.T) {
 	forEachBackend(t, func(t *testing.T, databaseURL string) {
 		t.Parallel()
@@ -5647,7 +5713,7 @@ func TestServer_StopIsBoundedWhenAStoreBlocks(t *testing.T) {
 			select {} // Block forever, like a query against a wedged database
 		}
 		return map[string]int64{}, nil
-	})
+	}, nil)
 	require.Nil(t, err)
 	<-syncing
 	s.mu.Lock()

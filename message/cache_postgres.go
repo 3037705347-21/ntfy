@@ -2,6 +2,8 @@ package message
 
 import (
 	"database/sql"
+	"fmt"
+	"strings"
 	"time"
 
 	"heckel.io/ntfy/v2/db"
@@ -104,30 +106,67 @@ const (
 )
 
 var postgresQueries = queries{
-	insertMessages:                   postgresInsertMessages,
-	selectScheduledMessageIDsBySeqID: postgresSelectScheduledMessageIDsBySeqIDQuery,
-	deleteScheduledBySequenceID:      postgresDeleteScheduledBySequenceIDQuery,
-	updateMessagesForTopicExpiry:     postgresUpdateMessagesForTopicExpiryQuery,
-	selectMessagesByID:               postgresSelectMessagesByIDQuery,
-	selectMessagesSinceTime:          postgresSelectMessagesSinceTimeQuery,
-	selectMessagesSinceTimeScheduled: postgresSelectMessagesSinceTimeIncludeScheduledQuery,
-	selectMessageRowID:               postgresSelectMessageRowIDQuery,
-	selectMessagesSinceID:            postgresSelectMessagesSinceIDQuery,
-	selectMessagesSinceIDScheduled:   postgresSelectMessagesSinceIDIncludeScheduledQuery,
-	selectMessagesLatest:             postgresSelectMessagesLatestQuery,
-	selectMessagesDue:                postgresSelectMessagesDueQuery,
-	claimMessagesDue:                 postgresClaimMessagesDueQuery,
-	deleteExpiredMessages:            postgresDeleteExpiredMessagesQuery,
-	updateMessagePublished:           postgresUpdateMessagePublishedQuery,
-	selectMessagesCount:              postgresSelectMessagesCountQuery,
-	selectTopics:                     postgresSelectTopicsQuery,
-	markExpiredAttachmentsDeleted:    postgresMarkExpiredAttachmentsDeletedQuery,
-	selectAttachmentsSizeBySender:    postgresSelectAttachmentsSizeBySenderQuery,
-	selectAttachmentsSizeByUserID:    postgresSelectAttachmentsSizeByUserIDQuery,
-	selectAttachmentsWithSizes:       postgresSelectAttachmentsWithSizesQuery,
-	selectStats:                      postgresSelectStatsQuery,
-	updateStats:                      postgresUpdateStatsQuery,
-	updateMessageTime:                postgresUpdateMessageTimeQuery,
+	insertMessages:                      postgresInsertMessages,
+	selectScheduledMessageIDsBySeqID:    postgresSelectScheduledMessageIDsBySeqIDQuery,
+	deleteScheduledBySequenceID:         postgresDeleteScheduledBySequenceIDQuery,
+	updateMessagesForTopicExpiry:        postgresUpdateMessagesForTopicExpiryQuery,
+	selectMessagesByID:                  postgresSelectMessagesByIDQuery,
+	selectMessagesSinceTime:             postgresSelectMessagesSinceTimeQuery,
+	selectMessagesSinceTimeScheduled:    postgresSelectMessagesSinceTimeIncludeScheduledQuery,
+	selectMessageRowID:                  postgresSelectMessageRowIDQuery,
+	selectMessagesSinceID:               postgresSelectMessagesSinceIDQuery,
+	selectMessagesSinceIDScheduled:      postgresSelectMessagesSinceIDIncludeScheduledQuery,
+	selectMessagesLatest:                postgresSelectMessagesLatestQuery,
+	selectMessagesDue:                   postgresSelectMessagesDueQuery,
+	claimMessagesDue:                    postgresClaimMessagesDueQuery,
+	deleteExpiredMessages:               postgresDeleteExpiredMessagesQuery,
+	updateMessagePublished:              postgresUpdateMessagePublishedQuery,
+	selectMessagesCount:                 postgresSelectMessagesCountQuery,
+	selectTopics:                        postgresSelectTopicsQuery,
+	markExpiredAttachmentsDeleted:       postgresMarkExpiredAttachmentsDeletedQuery,
+	selectAttachmentsSizeBySender:       postgresSelectAttachmentsSizeBySenderQuery,
+	selectAttachmentsSizeByUserID:       postgresSelectAttachmentsSizeByUserIDQuery,
+	selectAttachmentsWithSizes:          postgresSelectAttachmentsWithSizesQuery,
+	markExpiredAttachmentsDeletedPinned: postgresMarkExpiredAttachmentsDeletedPinned,
+	deleteExpiredMessagesPinned:         postgresDeleteExpiredMessagesPinned,
+	selectAttachmentsWithSizesPinned:    postgresSelectAttachmentsWithSizesPinned,
+	selectStats:                         postgresSelectStatsQuery,
+	updateStats:                         postgresUpdateStatsQuery,
+	updateMessageTime:                   postgresUpdateMessageTimeQuery,
+}
+
+// pgPlaceholders returns n comma-separated positional placeholders ($start, $start+1, ...).
+func pgPlaceholders(start, n int) string {
+	parts := make([]string, n)
+	for i := 0; i < n; i++ {
+		parts[i] = fmt.Sprintf("$%d", start+i)
+	}
+	return strings.Join(parts, ",")
+}
+
+// postgresMarkExpiredAttachmentsDeletedPinned is the pinned variant of
+// postgresMarkExpiredAttachmentsDeletedQuery. Argument order: now ($1), pinned ($2..), limit last.
+func postgresMarkExpiredAttachmentsDeletedPinned(now int64, limit int, pinned []string) (string, []any) {
+	limitVar := fmt.Sprintf("$%d", len(pinned)+2)
+	query := `UPDATE message SET attachment_deleted = TRUE WHERE mid IN (SELECT mid FROM message WHERE attachment_expires > 0 AND attachment_expires <= $1 AND attachment_deleted = FALSE AND mid NOT IN (` + pgPlaceholders(2, len(pinned)) + `) LIMIT ` + limitVar + `)`
+	args := append([]any{now}, stringArgs(pinned)...)
+	return query, append(args, limit)
+}
+
+// postgresDeleteExpiredMessagesPinned is the pinned variant of postgresDeleteExpiredMessagesQuery.
+// Argument order: now ($1), pinned ($2..), limit last.
+func postgresDeleteExpiredMessagesPinned(now int64, limit int, pinned []string) (string, []any) {
+	limitVar := fmt.Sprintf("$%d", len(pinned)+2)
+	query := `DELETE FROM message WHERE mid IN (SELECT mid FROM message WHERE expires <= $1 AND published = TRUE AND mid NOT IN (` + pgPlaceholders(2, len(pinned)) + `) LIMIT ` + limitVar + `)`
+	args := append([]any{now}, stringArgs(pinned)...)
+	return query, append(args, limit)
+}
+
+// postgresSelectAttachmentsWithSizesPinned returns the live attachment set plus every pinned
+// attachment. Argument order: now ($1), pinned ($2..).
+func postgresSelectAttachmentsWithSizesPinned(now int64, pinned []string) (string, []any) {
+	query := `SELECT mid, attachment_size FROM message WHERE (attachment_expires > $1 AND attachment_deleted = FALSE) OR mid IN (` + pgPlaceholders(2, len(pinned)) + `)`
+	return query, append([]any{now}, stringArgs(pinned)...)
 }
 
 // NewPostgresStore creates a new PostgreSQL-backed message cache store using an existing database connection pool.

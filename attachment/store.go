@@ -29,38 +29,43 @@ type Store struct {
 	sizes                map[string]int64                 // File ID -> size, for subtracting on Remove
 	attachmentsWithSizes func() (map[string]int64, error) // Returns file ID -> size for active attachments
 	orphanGracePeriod    time.Duration                    // Don't delete orphaned objects younger than this
+	retention            *Retention                       // Pinned IDs that must never be auto-deleted; nil disables
 	closeChan            chan struct{}
 	doneChan             chan struct{}
 	mu                   sync.RWMutex // Protects size and sizes
 }
 
-// NewFileStore creates a new file-system backed attachment cache
-func NewFileStore(dir string, totalSizeLimit int64, orphanGracePeriod time.Duration, attachmentsWithSizes func() (map[string]int64, error)) (*Store, error) {
+// NewFileStore creates a new file-system backed attachment cache. If retention is non-nil, the
+// attachment IDs listed in its manifest are never auto-deleted.
+func NewFileStore(dir string, totalSizeLimit int64, orphanGracePeriod time.Duration, attachmentsWithSizes func() (map[string]int64, error), retention *Retention) (*Store, error) {
 	b, err := newFileBackend(dir)
 	if err != nil {
 		return nil, err
 	}
-	return newStore(b, totalSizeLimit, orphanGracePeriod, attachmentsWithSizes)
+	return newStore(b, totalSizeLimit, orphanGracePeriod, attachmentsWithSizes, retention)
 }
 
 // NewS3Store creates a new S3-backed attachment cache. The s3URL must be in the format:
 //
 //	s3://ACCESS_KEY:SECRET_KEY@BUCKET[/PREFIX]?region=REGION[&endpoint=ENDPOINT][&disable_http2=true]
-func NewS3Store(s3URL string, totalSizeLimit int64, orphanGracePeriod time.Duration, attachmentsWithSizes func() (map[string]int64, error)) (*Store, error) {
+//
+// If retention is non-nil, the attachment IDs listed in its manifest are never auto-deleted.
+func NewS3Store(s3URL string, totalSizeLimit int64, orphanGracePeriod time.Duration, attachmentsWithSizes func() (map[string]int64, error), retention *Retention) (*Store, error) {
 	config, err := s3.ParseURL(s3URL)
 	if err != nil {
 		return nil, err
 	}
-	return newStore(newS3Backend(s3.New(config)), totalSizeLimit, orphanGracePeriod, attachmentsWithSizes)
+	return newStore(newS3Backend(s3.New(config)), totalSizeLimit, orphanGracePeriod, attachmentsWithSizes, retention)
 }
 
-func newStore(backend backend, totalSizeLimit int64, orphanGracePeriod time.Duration, attachmentsWithSizes func() (map[string]int64, error)) (*Store, error) {
+func newStore(backend backend, totalSizeLimit int64, orphanGracePeriod time.Duration, attachmentsWithSizes func() (map[string]int64, error), retention *Retention) (*Store, error) {
 	c := &Store{
 		backend:              backend,
 		limit:                totalSizeLimit,
 		sizes:                make(map[string]int64),
 		attachmentsWithSizes: attachmentsWithSizes,
 		orphanGracePeriod:    orphanGracePeriod,
+		retention:            retention,
 		closeChan:            make(chan struct{}),
 		doneChan:             make(chan struct{}),
 	}
@@ -117,22 +122,39 @@ func (c *Store) Read(id string) (io.ReadCloser, int64, error) {
 // Remove deletes attachment files by ID and subtracts their known sizes from
 // the total. Sizes for objects not tracked (e.g. written before this process
 // started and before the first sync) are corrected by the next sync() call.
+// IDs pinned via the retention manifest are left untouched and keep their size
+// accounting, so pinned attachments are never auto-deleted.
 func (c *Store) Remove(ids ...string) error {
 	for _, id := range ids {
 		if !model.ValidMessageID(id) {
 			return errInvalidFileID
 		}
 	}
+	// Filter out pinned IDs; those must never be removed from the backend.
+	removable := ids
+	if c.retention != nil {
+		removable = make([]string, 0, len(ids))
+		for _, id := range ids {
+			if c.retention.Contains(id) {
+				log.Tag(tagStore).Field("message_id", id).Debug("Skipping removal of pinned attachment")
+				continue
+			}
+			removable = append(removable, id)
+		}
+	}
+	if len(removable) == 0 {
+		return nil
+	}
 	// Remove from backend
-	for _, id := range ids {
+	for _, id := range removable {
 		log.Tag(tagStore).Field("message_id", id).Debug("Removing attachment")
 	}
-	if err := c.backend.Delete(ids...); err != nil {
+	if err := c.backend.Delete(removable...); err != nil {
 		return err
 	}
 	// Update total cache size
 	c.mu.Lock()
-	for _, id := range ids {
+	for _, id := range removable {
 		if size, ok := c.sizes[id]; ok {
 			c.size -= size
 			delete(c.sizes, id)
@@ -153,9 +175,17 @@ func (c *Store) Sync() error {
 // sync reconciles the backend storage with the database. It lists all objects,
 // deletes orphans (not in the valid ID set and older than the grace period), and
 // recomputes the total size from the existing attachments in the database.
+// Objects listed in the retention manifest are pinned: they are never treated as
+// orphans, even if missing from the database or past expiry.
 func (c *Store) sync() error {
 	if c.attachmentsWithSizes == nil {
 		return nil
+	}
+	// Hot-reload the retention manifest before reconciling so pin/unpin changes take effect.
+	// On error Reload keeps the previously loaded set, so a transient read failure never
+	// unpins anything.
+	if c.retention != nil {
+		_ = c.retention.Reload()
 	}
 	attachmentsWithSizes, err := c.attachmentsWithSizes()
 	if err != nil {
@@ -175,13 +205,25 @@ func (c *Store) sync() error {
 		if !model.ValidMessageID(obj.ID) {
 			continue
 		}
-		if _, ok := attachmentsWithSizes[obj.ID]; !ok && obj.LastModified.Before(cutoff) {
+		dbSize, inDB := attachmentsWithSizes[obj.ID]
+		pinned := c.retention != nil && c.retention.Contains(obj.ID)
+		if !inDB && !pinned && obj.LastModified.Before(cutoff) {
 			orphanIDs = append(orphanIDs, obj.ID)
-		} else {
-			count++
-			totalSize += attachmentsWithSizes[obj.ID]
-			sizes[obj.ID] = attachmentsWithSizes[obj.ID]
+			continue
 		}
+		count++
+		switch {
+		case inDB:
+			totalSize += dbSize
+			sizes[obj.ID] = dbSize
+		case pinned:
+			// A pinned object without a database row is kept regardless of expiry. Account for
+			// its real backend size so the total stays honest.
+			totalSize += obj.Size
+			sizes[obj.ID] = obj.Size
+		}
+		// A recent, non-pinned orphan that is still within the grace period is kept but does not
+		// contribute to the total until it is deleted on a later sync (as before).
 	}
 	log.Tag(tagStore).Debug("Attachment store updated: %d attachment(s), %s", count, util.FormatSizeHuman(totalSize))
 	c.mu.Lock()

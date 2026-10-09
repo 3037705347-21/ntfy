@@ -10,7 +10,7 @@ import (
 func newTestFileStore(t *testing.T, totalSizeLimit int64) (dir string, cache *Store) {
 	t.Helper()
 	dir = t.TempDir()
-	cache, err := NewFileStore(dir, totalSizeLimit, time.Hour, nil)
+	cache, err := NewFileStore(dir, totalSizeLimit, time.Hour, nil, nil)
 	require.Nil(t, err)
 	t.Cleanup(func() { cache.Close() })
 	return dir, cache

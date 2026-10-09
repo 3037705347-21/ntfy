@@ -192,11 +192,18 @@
 # - attachment-total-size-limit is the limit of the on-disk attachment cache directory (total size)
 # - attachment-file-size-limit is the per-file attachment size limit (e.g. 300k, 2M, 100M)
 # - attachment-expiry-duration is the duration after which uploaded attachments will be deleted (e.g. 3h, 20h)
+# - attachment-retention-file is an optional plaintext file that pins specific attachments for long-term
+#   retention. Put one attachment/message ID per line (the ID in the /file/<ID> link); blank lines and
+#   lines starting with "#" are ignored, and pasting a full /file URL also works. Listed attachments are
+#   never auto-deleted, and their messages are kept so the download links keep working. Removing an ID
+#   restores normal expiry. The file is reloaded at startup and periodically (no restart needed); the same
+#   file must be present on every node in a cluster. Works with both the local cache directory and S3.
 #
 # attachment-cache-dir:
 # attachment-total-size-limit: "5G"
 # attachment-file-size-limit: "15M"
 # attachment-expiry-duration: "3h"
+# attachment-retention-file: /etc/ntfy/attachment-retention.txt
 
 # Template directory for message templates.
 #

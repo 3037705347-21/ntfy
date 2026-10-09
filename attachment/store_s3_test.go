@@ -114,7 +114,7 @@ func TestS3Store_WriteWithPrefix(t *testing.T) {
 	client := s3.New(cfg)
 	deleteAllObjects(t, client)
 	backend := newS3Backend(client)
-	cache, err := newStore(backend, 10*1024, time.Hour, nil)
+	cache, err := newStore(backend, 10*1024, time.Hour, nil, nil)
 	require.Nil(t, err)
 	t.Cleanup(func() {
 		deleteAllObjects(t, client)
@@ -149,13 +149,46 @@ func newTestRealS3Store(t *testing.T, totalSizeLimit int64) (*Store, *modTimeOve
 	inner := newS3Backend(client)
 	wrapper := &modTimeOverrideBackend{backend: inner, modTimes: make(map[string]time.Time)}
 	deleteAllObjects(t, client)
-	store, err := newStore(wrapper, totalSizeLimit, time.Hour, nil)
+	store, err := newStore(wrapper, totalSizeLimit, time.Hour, nil, nil)
 	require.Nil(t, err)
 	t.Cleanup(func() {
 		deleteAllObjects(t, client)
 		store.Close()
 	})
 	return store, wrapper
+}
+
+// newTestRealS3StoreWithRetention builds an S3 store whose pin set is loaded from a local
+// retention manifest (the manifest is always a local file even with S3 storage). Alongside the
+// store and the mod-time wrapper it returns the loaded Retention and a function to rewrite the
+// manifest contents.
+func newTestRealS3StoreWithRetention(t *testing.T, totalSizeLimit int64, manifest string) (*Store, *modTimeOverrideBackend, *Retention, func(string)) {
+	t.Helper()
+	s3URL := os.Getenv("NTFY_TEST_S3_URL")
+	if s3URL == "" {
+		t.Skip("NTFY_TEST_S3_URL not set")
+	}
+	cfg, err := s3.ParseURL(s3URL)
+	require.Nil(t, err)
+	sweepOnce.Do(func() { sweepStaleTestObjects(t, cfg) })
+	cfg.Prefix = testKeyPrefix(t, cfg.Prefix)
+	client := s3.New(cfg)
+	inner := newS3Backend(client)
+	wrapper := &modTimeOverrideBackend{backend: inner, modTimes: make(map[string]time.Time)}
+	deleteAllObjects(t, client)
+	manifestPath := writeRetentionFile(t, manifest)
+	r, err := NewRetention(manifestPath)
+	require.Nil(t, err)
+	store, err := newStore(wrapper, totalSizeLimit, time.Hour, nil, r)
+	require.Nil(t, err)
+	t.Cleanup(func() {
+		deleteAllObjects(t, client)
+		store.Close()
+	})
+	rewrite := func(content string) {
+		require.Nil(t, os.WriteFile(manifestPath, []byte(content), 0600))
+	}
+	return store, wrapper, r, rewrite
 }
 
 func deleteAllObjects(t *testing.T, client *s3.Client) {

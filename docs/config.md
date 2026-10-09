@@ -526,6 +526,7 @@ The following config options are relevant to attachments:
 * `attachment-total-size-limit` is the size limit of the attachment storage (default: 5G)
 * `attachment-file-size-limit` is the per-file attachment size limit (e.g. 300k, 2M, 100M, default: 15M)
 * `attachment-expiry-duration` is the duration after which uploaded attachments will be deleted (e.g. 3h, 20h, default: 3h)
+* `attachment-retention-file` is an optional plaintext file listing attachments that must never be auto-deleted (see [long-term attachment retention](#long-term-attachment-retention-pinning))
 
 !!! warning
     ntfy takes full control over the attachment directory or S3 bucket. Files that match the message ID format without
@@ -533,6 +534,35 @@ The following config options are relevant to attachments:
 
 Please also refer to the [rate limiting](#rate-limiting) settings below, specifically `visitor-attachment-total-size-limit`
 and `visitor-attachment-daily-bandwidth-limit`. Setting these conservatively is necessary to avoid abuse.
+
+### Long-term attachment retention (pinning)
+For compliance/audit use cases you may want certain attachments to be kept indefinitely instead of being removed after
+`attachment-expiry-duration`. Point `attachment-retention-file` at a plaintext **retention manifest** that lists the
+attachments to pin. Attachments listed in it are never auto-deleted, and the messages they belong to are kept as well,
+so their `/file/<ID>` download links keep working and the messages remain in the topic history. This works identically
+with the [local filesystem](#filesystem-storage) and [S3](#s3-storage) backends.
+
+The manifest contains one attachment/message ID per line. Blank lines and lines starting with `#` are ignored. You can
+use the bare 12-character ID (which is also the object/file name), an ID with its file extension, or simply paste the
+full `/file/<ID>` URL. Pinned attachments still count towards `attachment-total-size-limit`.
+
+``` title="/etc/ntfy/attachment-retention.txt"
+# Compliance retention manifest - one attachment/message ID per line
+# Comments and blank lines are ignored. A full /file URL works too.
+a1B2c3D4e5F6
+https://ntfy.example.com/file/Z9y8X7w6V5u4.jpg
+```
+
+The file is read at startup and reloaded periodically, so edits take effect without a restart (typically within a few
+minutes). Removing an ID from the file restores normal expiry, and that attachment is cleaned up on the next prune/sync
+cycle. Attachments that are not listed are completely unaffected. If the configured file cannot be read at startup the
+server refuses to start, and a later read error keeps the previously loaded set, so a transient problem never
+accidentally unpins anything.
+
+!!! warning
+    In a cluster (multiple nodes sharing PostgreSQL/S3), **place the same retention file on every node** (e.g. via a
+    configuration management tool or a shared mount). Any node without the current manifest could otherwise garbage-collect
+    a pinned attachment during its reconciliation.
 
 ### Filesystem storage
 Here's an example config using the local filesystem for attachment storage:
@@ -550,6 +580,7 @@ Here's an example config using the local filesystem for attachment storage:
     attachment-total-size-limit: "5G"
     attachment-file-size-limit: "15M"
     attachment-expiry-duration: "3h"
+    attachment-retention-file: "/etc/ntfy/attachment-retention.txt"
     visitor-attachment-total-size-limit: "100M"
     visitor-attachment-daily-bandwidth-limit: "500M"
     ```
@@ -2383,6 +2414,7 @@ variable before running the `ntfy` command (e.g. `export NTFY_LISTEN_HTTP=:80`).
 | `attachment-total-size-limit`              | `NTFY_ATTACHMENT_TOTAL_SIZE_LIMIT`              | *size*                                              | 5G                | Limit of the on-disk attachment cache directory. If the limits is exceeded, new attachments will be rejected.                                                                                                                           |
 | `attachment-file-size-limit`               | `NTFY_ATTACHMENT_FILE_SIZE_LIMIT`               | *size*                                              | 15M               | Per-file attachment size limit (e.g. 300k, 2M, 100M). Larger attachment will be rejected.                                                                                                                                               |
 | `attachment-expiry-duration`               | `NTFY_ATTACHMENT_EXPIRY_DURATION`               | *duration*                                          | 3h                | Duration after which uploaded attachments will be deleted (e.g. 3h, 20h). Strongly affects `visitor-attachment-total-size-limit`.                                                                                                       |
+| `attachment-retention-file`                | `NTFY_ATTACHMENT_RETENTION_FILE`                | *file path*                                         | -                 | Plaintext file (one attachment/message ID per line) listing attachments that must never be auto-deleted. Hot-reloaded; empty disables. Works with local and S3 storage.                                                                |
 | `smtp-sender-addr`                         | `NTFY_SMTP_SENDER_ADDR`                         | `host:port`                                         | -                 | SMTP server address to allow email sending                                                                                                                                                                                              |
 | `smtp-sender-user`                         | `NTFY_SMTP_SENDER_USER`                         | *string*                                            | -                 | SMTP user; only used if e-mail sending is enabled                                                                                                                                                                                       |
 | `smtp-sender-pass`                         | `NTFY_SMTP_SENDER_PASS`                         | *string*                                            | -                 | SMTP password; only used if e-mail sending is enabled                                                                                                                                                                                   |

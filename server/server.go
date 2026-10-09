@@ -223,10 +223,24 @@ func New(conf *Config) (*Server, error) {
 		}
 		pool = db.New(primary, replicas)
 	}
+	// Load the attachment retention manifest (if configured) before anything that prunes or
+	// reconciles attachments. A configured-but-unreadable manifest is a startup error so the
+	// server fails closed instead of silently unpinning attachments.
+	retention, err := attachment.NewRetention(conf.AttachmentRetentionFile)
+	if err != nil {
+		return nil, err
+	}
 	messageCache, err := createMessageCache(conf, pool)
 	if err != nil {
 		return nil, err
 	}
+	// Feed the hot-reloaded pinned-ID set to the message cache so pinned messages/attachments
+	// are excluded from expiry. Reload errors keep the previous set (logged inside Reload), so a
+	// transient read failure never blocks pruning or unpins anything.
+	messageCache.SetPinnedIDs(func() ([]string, error) {
+		_ = retention.Reload()
+		return retention.IDs()
+	})
 	var wp *webpush.Store
 	if conf.WebPushPublicKey != "" {
 		if pool != nil {
@@ -250,7 +264,7 @@ func New(conf *Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	attachmentStore, err := createAttachmentStore(conf, messageCache)
+	attachmentStore, err := createAttachmentStore(conf, messageCache, retention)
 	if err != nil {
 		return nil, err
 	}
@@ -366,11 +380,11 @@ func createMessageCache(conf *Config, pool *db.DB) (*message.Cache, error) {
 	return message.NewMemStore()
 }
 
-func createAttachmentStore(conf *Config, messageCache *message.Cache) (*attachment.Store, error) {
+func createAttachmentStore(conf *Config, messageCache *message.Cache, retention *attachment.Retention) (*attachment.Store, error) {
 	if strings.HasPrefix(conf.AttachmentCacheDir, "s3://") {
-		return attachment.NewS3Store(conf.AttachmentCacheDir, conf.AttachmentTotalSizeLimit, conf.AttachmentOrphanGracePeriod, messageCache.AttachmentsWithSizes)
+		return attachment.NewS3Store(conf.AttachmentCacheDir, conf.AttachmentTotalSizeLimit, conf.AttachmentOrphanGracePeriod, messageCache.AttachmentsWithSizes, retention)
 	} else if conf.AttachmentCacheDir != "" {
-		return attachment.NewFileStore(conf.AttachmentCacheDir, conf.AttachmentTotalSizeLimit, conf.AttachmentOrphanGracePeriod, messageCache.AttachmentsWithSizes)
+		return attachment.NewFileStore(conf.AttachmentCacheDir, conf.AttachmentTotalSizeLimit, conf.AttachmentOrphanGracePeriod, messageCache.AttachmentsWithSizes, retention)
 	}
 	return nil, nil
 }
