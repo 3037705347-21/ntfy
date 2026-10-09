@@ -469,6 +469,98 @@ func TestParseTokens_Errors(t *testing.T) {
 	}
 }
 
+func TestParseEmails_Success(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    []string
+		expected []*user.ProvisionedEmail
+	}{
+		{
+			name:  "verified email without recovery marker",
+			input: []string{"ben:ben-work@example.com"},
+			expected: []*user.ProvisionedEmail{
+				{Username: "ben", Address: "ben-work@example.com", Recovery: false},
+			},
+		},
+		{
+			name:  "recovery email",
+			input: []string{"ben:ben@example.com:recovery"},
+			expected: []*user.ProvisionedEmail{
+				{Username: "ben", Address: "ben@example.com", Recovery: true},
+			},
+		},
+		{
+			name: "multiple entries and accounts",
+			input: []string{
+				"ben:ben@example.com:recovery",
+				"ben:ben-work@example.com",
+				"alice:alice@example.com:recovery",
+			},
+			expected: []*user.ProvisionedEmail{
+				{Username: "ben", Address: "ben@example.com", Recovery: true},
+				{Username: "ben", Address: "ben-work@example.com", Recovery: false},
+				{Username: "alice", Address: "alice@example.com", Recovery: true},
+			},
+		},
+		{
+			name:     "empty input",
+			input:    []string{},
+			expected: []*user.ProvisionedEmail{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := parseEmails(tt.input)
+			require.NoError(t, err)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestParseEmails_Errors(t *testing.T) {
+	tests := []struct {
+		name  string
+		input []string
+		error string
+	}{
+		{
+			name:  "invalid format - too few parts",
+			input: []string{"ben"},
+			error: "invalid auth-emails: ben, expected format: 'user:email[:recovery]'",
+		},
+		{
+			name:  "invalid format - too many parts",
+			input: []string{"ben:ben@example.com:recovery:extra"},
+			error: "invalid auth-emails: ben:ben@example.com:recovery:extra, expected format: 'user:email[:recovery]'",
+		},
+		{
+			name:  "invalid third marker",
+			input: []string{"ben:ben@example.com:primary"},
+			error: "invalid auth-emails: ben:ben@example.com:primary, third field must be 'recovery'",
+		},
+		{
+			name:  "invalid username",
+			input: []string{"bad user:ben@example.com"},
+			error: "invalid auth-emails: bad user:ben@example.com, username bad user invalid",
+		},
+		{
+			name:  "invalid email address",
+			input: []string{"ben:not-an-email"},
+			error: "invalid auth-emails: ben:not-an-email, email address not-an-email invalid",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := parseEmails(tt.input)
+			require.Error(t, err)
+			require.Nil(t, result)
+			assert.Contains(t, err.Error(), tt.error)
+		})
+	}
+}
+
 func TestCLI_Serve_Unix_Curl(t *testing.T) {
 	sockFile := filepath.Join(t.TempDir(), "ntfy.sock")
 	configFile := newEmptyFile(t) // Avoid issues with existing server.yml file on system

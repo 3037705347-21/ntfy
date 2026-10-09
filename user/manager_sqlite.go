@@ -70,21 +70,22 @@ const (
 				ELSE 2
 			END, user
 	`
-	sqliteSelectUserCountQuery          = `SELECT COUNT(*) FROM user`
-	sqliteSelectUserIDFromUsernameQuery = `SELECT id FROM user WHERE user = ?`
-	sqliteInsertUserQuery               = `INSERT INTO user (id, user, pass, role, sync_topic, provisioned, created) VALUES (?, ?, ?, ?, ?, ?, ?)`
-	sqliteUpdateUserPassQuery           = `UPDATE user SET pass = ? WHERE user = ?`
-	sqliteUpdateUserRoleQuery           = `UPDATE user SET role = ? WHERE user = ?`
-	sqliteUpdateUserProvisionedQuery    = `UPDATE user SET provisioned = ? WHERE user = ?`
-	sqliteUpdateUserPrefsQuery          = `UPDATE user SET prefs = ? WHERE id = ?`
-	sqliteUpdateUserStatsQuery          = `UPDATE user SET stats_messages = ?, stats_emails = ?, stats_calls = ? WHERE id = ?`
-	sqliteUpdateUserStatsResetAllQuery  = `UPDATE user SET stats_messages = 0, stats_emails = 0, stats_calls = 0`
-	sqliteUpdateUserTierQuery           = `UPDATE user SET tier_id = (SELECT id FROM tier WHERE code = ?) WHERE user = ?`
-	sqliteUpdateUserDeletedQuery        = `UPDATE user SET deleted = ? WHERE id = ?`
-	sqliteDeleteUserQuery               = `DELETE FROM user WHERE user = ?`
-	sqliteDeleteUserTierQuery           = `UPDATE user SET tier_id = null WHERE user = ?`
-	sqliteDeleteUsersMarkedQuery        = `DELETE FROM user WHERE deleted < ?`
-	sqliteDeleteUsersProvisionedQuery   = `DELETE FROM user WHERE provisioned = 1`
+	sqliteSelectUserCountQuery                = `SELECT COUNT(*) FROM user`
+	sqliteSelectUserIDFromUsernameQuery       = `SELECT id FROM user WHERE user = ?`
+	sqliteSelectActiveUserIDFromUsernameQuery = `SELECT id FROM user WHERE user = ? AND deleted IS NULL`
+	sqliteInsertUserQuery                     = `INSERT INTO user (id, user, pass, role, sync_topic, provisioned, created) VALUES (?, ?, ?, ?, ?, ?, ?)`
+	sqliteUpdateUserPassQuery                 = `UPDATE user SET pass = ? WHERE user = ?`
+	sqliteUpdateUserRoleQuery                 = `UPDATE user SET role = ? WHERE user = ?`
+	sqliteUpdateUserProvisionedQuery          = `UPDATE user SET provisioned = ? WHERE user = ?`
+	sqliteUpdateUserPrefsQuery                = `UPDATE user SET prefs = ? WHERE id = ?`
+	sqliteUpdateUserStatsQuery                = `UPDATE user SET stats_messages = ?, stats_emails = ?, stats_calls = ? WHERE id = ?`
+	sqliteUpdateUserStatsResetAllQuery        = `UPDATE user SET stats_messages = 0, stats_emails = 0, stats_calls = 0`
+	sqliteUpdateUserTierQuery                 = `UPDATE user SET tier_id = (SELECT id FROM tier WHERE code = ?) WHERE user = ?`
+	sqliteUpdateUserDeletedQuery              = `UPDATE user SET deleted = ? WHERE id = ?`
+	sqliteDeleteUserQuery                     = `DELETE FROM user WHERE user = ?`
+	sqliteDeleteUserTierQuery                 = `UPDATE user SET tier_id = null WHERE user = ?`
+	sqliteDeleteUsersMarkedQuery              = `DELETE FROM user WHERE deleted < ?`
+	sqliteDeleteUsersProvisionedQuery         = `DELETE FROM user WHERE provisioned = 1`
 
 	// Access queries
 	sqliteSelectTopicPermsQuery = `
@@ -224,14 +225,19 @@ const (
 	sqliteDeletePhoneNumberQuery  = `DELETE FROM user_phone WHERE user_id = ? AND phone_number = ?`
 
 	// Email queries
-	sqliteSelectEmailsQuery            = `SELECT email, is_primary FROM user_email WHERE user_id = ? ORDER BY email`
-	sqliteInsertEmailQuery             = `INSERT INTO user_email (user_id, email) VALUES (?, ?)`
-	sqliteInsertEmailIgnoreQuery       = `INSERT INTO user_email (user_id, email) VALUES (?, ?) ON CONFLICT (user_id, email) DO NOTHING`
-	sqliteDeleteEmailQuery             = `DELETE FROM user_email WHERE user_id = ? AND email = ?`
-	sqliteSelectPrimaryEmailQuery      = `SELECT email FROM user_email WHERE user_id = ? AND is_primary = 1`
-	sqliteSelectUserIDByPrimaryQuery   = `SELECT user_id FROM user_email WHERE email = ? AND is_primary = 1`
-	sqliteUpdateEmailSetPrimaryQuery   = `UPDATE user_email SET is_primary = 1 WHERE user_id = ? AND email = ?`
-	sqliteUpdateEmailClearPrimaryQuery = `UPDATE user_email SET is_primary = 0 WHERE user_id = ? AND is_primary = 1`
+	sqliteSelectEmailsQuery                   = `SELECT email, is_primary, provisioned FROM user_email WHERE user_id = ? ORDER BY email`
+	sqliteInsertEmailQuery                    = `INSERT INTO user_email (user_id, email) VALUES (?, ?)`
+	sqliteInsertEmailIgnoreQuery              = `INSERT INTO user_email (user_id, email) VALUES (?, ?) ON CONFLICT (user_id, email) DO NOTHING`
+	sqliteDeleteEmailQuery                    = `DELETE FROM user_email WHERE user_id = ? AND email = ?`
+	sqliteSelectPrimaryEmailQuery             = `SELECT email FROM user_email WHERE user_id = ? AND is_primary = 1`
+	sqliteSelectUserIDByPrimaryQuery          = `SELECT user_id FROM user_email WHERE email = ? AND is_primary = 1`
+	sqliteUpdateEmailSetPrimaryQuery          = `UPDATE user_email SET is_primary = 1 WHERE user_id = ? AND email = ?`
+	sqliteUpdateEmailClearPrimaryQuery        = `UPDATE user_email SET is_primary = 0 WHERE user_id = ? AND is_primary = 1`
+	sqliteSelectAllProvisionedEmailsQuery     = `SELECT user_id, email, is_primary FROM user_email WHERE provisioned = 1 ORDER BY user_id, email`
+	sqliteInsertEmailProvisionedQuery         = `INSERT INTO user_email (user_id, email, provisioned) VALUES (?, ?, 1) ON CONFLICT (user_id, email) DO NOTHING`
+	sqliteDeleteProvisionedEmailQuery         = `DELETE FROM user_email WHERE user_id = ? AND email = ? AND provisioned = 1`
+	sqliteDeleteAllProvisionedEmailsQuery     = `DELETE FROM user_email WHERE provisioned = 1`
+	sqliteUpdateEmailClearPrimaryManagedQuery = `UPDATE user_email SET is_primary = 0 WHERE user_id = ? AND is_primary = 1 AND provisioned = 1`
 
 	// Magic link queries (email verification + password reset)
 	sqliteInsertMagicLinkQuery         = `INSERT INTO user_magic_link (token_hash, kind, user_id, email, expires, created) VALUES (?, ?, ?, ?, ?, ?)`
@@ -275,6 +281,7 @@ var sqliteQueries = queries{
 	selectUsers:                    sqliteSelectUsersQuery,
 	selectUserCount:                sqliteSelectUserCountQuery,
 	selectUserIDFromUsername:       sqliteSelectUserIDFromUsernameQuery,
+	selectActiveUserIDFromUsername: sqliteSelectActiveUserIDFromUsernameQuery,
 	insertUser:                     sqliteInsertUserQuery,
 	updateUserPass:                 sqliteUpdateUserPassQuery,
 	updateUserRole:                 sqliteUpdateUserRoleQuery,
@@ -333,6 +340,11 @@ var sqliteQueries = queries{
 	selectUserIDByPrimary:          sqliteSelectUserIDByPrimaryQuery,
 	updateEmailSetPrimary:          sqliteUpdateEmailSetPrimaryQuery,
 	updateEmailClearPrimary:        sqliteUpdateEmailClearPrimaryQuery,
+	selectAllProvisionedEmails:     sqliteSelectAllProvisionedEmailsQuery,
+	insertEmailProvisioned:         sqliteInsertEmailProvisionedQuery,
+	deleteProvisionedEmail:         sqliteDeleteProvisionedEmailQuery,
+	deleteAllProvisionedEmails:     sqliteDeleteAllProvisionedEmailsQuery,
+	updateEmailClearPrimaryManaged: sqliteUpdateEmailClearPrimaryManagedQuery,
 	insertMagicLink:                sqliteInsertMagicLinkQuery,
 	selectMagicLinkByHash:          sqliteSelectMagicLinkByHashQuery,
 	deleteMagicLinkByHash:          sqliteDeleteMagicLinkByHashQuery,

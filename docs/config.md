@@ -645,6 +645,7 @@ Once configured, you can use
 - the `ntfy access` command and the `auth-access` option to [modify the access control list](#access-control-list-acl)
 and topic patterns, and
 - the `ntfy token` command and the `auth-tokens` config option to [manage access tokens](#access-tokens) for users.
+- the `auth-emails` config option to [centrally assign verified and recovery emails](#account-e-mails-via-the-config) to accounts.
 
 These commands **directly edit the auth database** (as defined in `auth-file`), so they only work on the server, 
 and only if the user accessing them has the right permissions.
@@ -903,6 +904,69 @@ Here's an example:
 In this example, the `auth-users` section defines two users, `phil` and `backup-service`. The `auth-tokens` section
 defines access tokens for these users. `phil` has a token `tk_3gd7d2yftt4b8ixyfe9mnmro88o76`, while `backup-service`
 has a token `tk_f099we8uzj7xi5qshzajwp6jffvkz` with the label "Backup script".
+
+### Account e-mails
+Typically, each user [verifies their own e-mail addresses](../subscribe/web/#account) by clicking a link sent to them.
+The verified **primary** (recovery) e-mail is what password-reset mails are sent to, and it can also be used to log in
+instead of the username.
+
+* [In the config](#account-e-mails-via-the-config): Administrators can assign verified and recovery e-mails to accounts
+  centrally via the `auth-emails` key in `server.yml`. No verification click is required.
+
+#### Account e-mails via the config
+Verified and recovery e-mails can be pre-provisioned in the `server.yml` configuration file using the `auth-emails`
+config option. This is useful to centrally manage which e-mail addresses belong to company accounts, without asking
+every user to go through the verification flow.
+
+The `auth-emails` option is a list of e-mail assignments that are reconciled when the server starts. Each entry is
+defined in the format `<username>:<email>[:recovery]`:
+
+* `<username>` is an **existing account** -- either a user defined in `auth-users`, or any other account that was
+  created e.g. via sign-up or `ntfy user add`. Assigning e-mails to a non-existent account is a configuration error.
+* `<email>` is provisioned as a **verified** e-mail address on that account, immediately and without a verification
+  click. It can be used like any other verified address.
+* the optional `recovery` marker makes the address the account's **primary (recovery) e-mail**: password-reset mails
+  for the account are sent to it, and logging in with the e-mail address works. At most one recovery e-mail per
+  account is allowed.
+
+Here's an example: `ben` has two verified addresses, with `ben@example.com` being his recovery e-mail; `alice` has one
+verified (and recovery) address.
+
+=== "Declarative e-mails in /etc/ntfy/server.yml"
+    ``` yaml
+    auth-file: "/var/lib/ntfy/user.db"
+    auth-emails:
+      - "ben:ben@example.com:recovery"
+      - "ben:ben-work@example.com"
+      - "alice:alice@example.com:recovery"
+    ```
+
+=== "Declarative e-mails via env variables"
+    ```
+    # Comma-separated list
+    NTFY_AUTH_EMAILS='ben:ben@example.com:recovery,ben:ben-work@example.com,alice:alice@example.com:recovery'
+    ```
+
+!!! important
+    E-mail addresses assigned through this list are **owned by the config**. When an entry is removed from
+    `auth-emails`, the address is revoked (deleted) on the next server start. E-mail addresses that a user verified
+    themselves are never touched -- they keep working even if they are not part of the list. If the list contains an
+    address the user already verified, the address keeps its user ownership and is likewise not revoked when delisted.
+
+    Designating a recovery e-mail moves the "primary" star on that account. The previously primary address is **not
+    deleted**, it merely stops being the recovery destination.
+
+#### Conflicting e-mail configuration
+Reconciliation is **all-or-nothing**: if the `auth-emails` list contains a conflict, the server does not start and no
+e-mail change (and no other provisioning change) is applied. The error message lists every conflict with its position
+in the config. These are the conflicts:
+
+* the same e-mail address is assigned to more than one account (or appears on multiple lines)
+* one account has more than one `recovery` e-mail configured
+* an entry references an account that does not exist
+* an entry is marked as the recovery e-mail of an account, but is already the recovery e-mail of another account
+
+Fix the list and restart the server; nothing needs to be repaired in the database.
 
 ### Example: Private instance
 The easiest way to configure a private instance is to set `auth-default-access` to `deny-all` in the `server.yml`,

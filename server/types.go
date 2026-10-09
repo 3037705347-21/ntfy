@@ -311,10 +311,12 @@ type apiAccountReservation struct {
 // apiAccountEmailInfo describes one email address on the account, as returned by GET /v1/account.
 // Verified addresses have pending=false; exactly one verified address may be primary (the
 // recovery email). Pending addresses are awaiting a magic-link click and are never primary.
+// Provisioned addresses are admin-managed via the auth-emails config.
 type apiAccountEmailInfo struct {
-	Address string `json:"address"`
-	Primary bool   `json:"primary,omitempty"`
-	Pending bool   `json:"pending,omitempty"`
+	Address     string `json:"address"`
+	Primary     bool   `json:"primary,omitempty"`
+	Pending     bool   `json:"pending,omitempty"`
+	Provisioned bool   `json:"provisioned,omitempty"`
 }
 
 type apiAccountBilling struct {

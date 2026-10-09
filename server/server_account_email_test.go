@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -448,6 +449,99 @@ func TestAccount_PasswordReset_InvalidToken(t *testing.T) {
 		rr := request(t, s, "POST", "/v1/account/password/reset", `{"token":"nope","password":"brandnew"}`, nil)
 		require.Equal(t, 400, rr.Code)
 		require.Equal(t, 40054, toHTTPError(t, rr.Body.String()).Code)
+	})
+}
+
+// emailByAddr finds the structured entry for an address in the GET /v1/account response.
+func emailByAddr(account *apiAccountResponse, addr string) *apiAccountEmailInfo {
+	for _, e := range account.Emails {
+		if e.Address == addr {
+			return e
+		}
+	}
+	return nil
+}
+
+func TestAccount_Email_ProvisionedViaConfig(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, databaseURL string) {
+		conf := newTestConfigWithAuthFile(t, databaseURL)
+		conf.SMTPSenderAddr = "localhost:25"
+		conf.SMTPSenderFrom = "noreply@example.com"
+		conf.BaseURL = "https://ntfy.example.com"
+
+		// Start once to create a regular, non-provisioned account ("self-signed-up")
+		s := newTestServer(t, conf)
+		require.Nil(t, s.userManager.AddUser("alice", "alice", user.RoleUser, false))
+		s.closeDatabases()
+
+		// Second start: the admin list assigns a verified + recovery email to the account
+		conf.AuthEmails = []*user.ProvisionedEmail{
+			{Username: "alice", Address: "alice@example.com", Recovery: true},
+			{Username: "alice", Address: "alice-work@example.com"},
+		}
+		s = newTestServer(t, conf)
+		mailer := newCaptureMailer()
+		s.mailer = mailer
+		auth := map[string]string{"Authorization": util.BasicAuth("alice", "alice")}
+
+		account := getAccount(t, s, auth)
+		recovery := emailByAddr(account, "alice@example.com")
+		require.NotNil(t, recovery)
+		require.True(t, recovery.Primary)
+		require.True(t, recovery.Provisioned)
+		work := emailByAddr(account, "alice-work@example.com")
+		require.NotNil(t, work)
+		require.False(t, work.Primary)
+		require.True(t, work.Provisioned)
+
+		// The provisioned recovery email logs in, and password reset goes to it
+		require.True(t, canLogin(t, s, "alice@example.com", "alice"))
+		require.Equal(t, 200, request(t, s, "POST", "/v1/account/password/reset/request", `{"identifier":"alice"}`, nil).Code)
+		require.NotEmpty(t, mailer.resetLinks["alice@example.com"])
+		token := tokenFromLink(t, mailer.resetLinks["alice@example.com"], "https://ntfy.example.com/account/password/reset/")
+		require.Equal(t, 200, request(t, s, "POST", "/v1/account/password/reset", fmt.Sprintf(`{"token":"%s","password":"brandnew"}`, token), nil).Code)
+		require.True(t, canLogin(t, s, "alice@example.com", "brandnew"))
+		auth = map[string]string{"Authorization": util.BasicAuth("alice", "brandnew")}
+
+		// Alice also verifies a private address herself
+		verifyEmailFor(t, s, mailer, auth, "alice-personal@example.com")
+
+		// Third start: the work address is delisted; the self-verified one must survive
+		s.closeDatabases()
+		conf.AuthEmails = []*user.ProvisionedEmail{
+			{Username: "alice", Address: "alice@example.com", Recovery: true},
+		}
+		s = newTestServer(t, conf)
+		s.mailer = mailer
+
+		account = getAccount(t, s, auth)
+		require.NotNil(t, emailByAddr(account, "alice@example.com"))
+		require.Nil(t, emailByAddr(account, "alice-work@example.com")) // managed address revoked
+		personal := emailByAddr(account, "alice-personal@example.com")
+		require.NotNil(t, personal) // self-verified address kept
+		require.False(t, personal.Provisioned)
+	})
+}
+
+func TestAccount_Email_ProvisionedConflictFailsStartup(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, databaseURL string) {
+		hash, err := user.HashPassword("pass", user.DefaultUserPasswordBcryptCost)
+		require.Nil(t, err)
+		conf := newTestConfigWithAuthFile(t, databaseURL)
+		conf.AuthUsers = []*user.User{
+			{Name: "ben", Hash: hash, Role: user.RoleUser},
+			{Name: "alice", Hash: hash, Role: user.RoleUser},
+		}
+		// Same address assigned to two accounts -> the whole list must be rejected
+		conf.AuthEmails = []*user.ProvisionedEmail{
+			{Username: "ben", Address: "shared@example.com", Recovery: true},
+			{Username: "alice", Address: "shared@example.com"},
+		}
+		s, err := New(conf)
+		require.Error(t, err)
+		require.Nil(t, s)
+		require.True(t, errors.Is(err, user.ErrEmailProvisioningConflict), "expected provisioning conflict, got %v", err)
+		require.Contains(t, err.Error(), "shared@example.com")
 	})
 }
 

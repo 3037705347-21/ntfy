@@ -66,21 +66,22 @@ const (
 				ELSE 2
 			END, user_name
 	`
-	postgresSelectUserCountQuery          = `SELECT COUNT(*) FROM "user"`
-	postgresSelectUserIDFromUsernameQuery = `SELECT id FROM "user" WHERE user_name = $1`
-	postgresInsertUserQuery               = `INSERT INTO "user" (id, user_name, pass, role, sync_topic, provisioned, created) VALUES ($1, $2, $3, $4, $5, $6, $7)`
-	postgresUpdateUserPassQuery           = `UPDATE "user" SET pass = $1 WHERE user_name = $2`
-	postgresUpdateUserRoleQuery           = `UPDATE "user" SET role = $1 WHERE user_name = $2`
-	postgresUpdateUserProvisionedQuery    = `UPDATE "user" SET provisioned = $1 WHERE user_name = $2`
-	postgresUpdateUserPrefsQuery          = `UPDATE "user" SET prefs = $1 WHERE id = $2`
-	postgresUpdateUserStatsQuery          = `UPDATE "user" SET stats_messages = $1, stats_emails = $2, stats_calls = $3 WHERE id = $4`
-	postgresUpdateUserStatsResetAllQuery  = `UPDATE "user" SET stats_messages = 0, stats_emails = 0, stats_calls = 0`
-	postgresUpdateUserTierQuery           = `UPDATE "user" SET tier_id = (SELECT id FROM tier WHERE code = $1) WHERE user_name = $2`
-	postgresUpdateUserDeletedQuery        = `UPDATE "user" SET deleted = $1 WHERE id = $2`
-	postgresDeleteUserQuery               = `DELETE FROM "user" WHERE user_name = $1`
-	postgresDeleteUserTierQuery           = `UPDATE "user" SET tier_id = null WHERE user_name = $1`
-	postgresDeleteUsersMarkedQuery        = `DELETE FROM "user" WHERE deleted < $1`
-	postgresDeleteUsersProvisionedQuery   = `DELETE FROM "user" WHERE provisioned = true`
+	postgresSelectUserCountQuery                = `SELECT COUNT(*) FROM "user"`
+	postgresSelectUserIDFromUsernameQuery       = `SELECT id FROM "user" WHERE user_name = $1`
+	postgresSelectActiveUserIDFromUsernameQuery = `SELECT id FROM "user" WHERE user_name = $1 AND deleted IS NULL`
+	postgresInsertUserQuery                     = `INSERT INTO "user" (id, user_name, pass, role, sync_topic, provisioned, created) VALUES ($1, $2, $3, $4, $5, $6, $7)`
+	postgresUpdateUserPassQuery                 = `UPDATE "user" SET pass = $1 WHERE user_name = $2`
+	postgresUpdateUserRoleQuery                 = `UPDATE "user" SET role = $1 WHERE user_name = $2`
+	postgresUpdateUserProvisionedQuery          = `UPDATE "user" SET provisioned = $1 WHERE user_name = $2`
+	postgresUpdateUserPrefsQuery                = `UPDATE "user" SET prefs = $1 WHERE id = $2`
+	postgresUpdateUserStatsQuery                = `UPDATE "user" SET stats_messages = $1, stats_emails = $2, stats_calls = $3 WHERE id = $4`
+	postgresUpdateUserStatsResetAllQuery        = `UPDATE "user" SET stats_messages = 0, stats_emails = 0, stats_calls = 0`
+	postgresUpdateUserTierQuery                 = `UPDATE "user" SET tier_id = (SELECT id FROM tier WHERE code = $1) WHERE user_name = $2`
+	postgresUpdateUserDeletedQuery              = `UPDATE "user" SET deleted = $1 WHERE id = $2`
+	postgresDeleteUserQuery                     = `DELETE FROM "user" WHERE user_name = $1`
+	postgresDeleteUserTierQuery                 = `UPDATE "user" SET tier_id = null WHERE user_name = $1`
+	postgresDeleteUsersMarkedQuery              = `DELETE FROM "user" WHERE deleted < $1`
+	postgresDeleteUsersProvisionedQuery         = `DELETE FROM "user" WHERE provisioned = true`
 
 	// Access queries
 	postgresSelectTopicPermsQuery = `
@@ -227,14 +228,19 @@ const (
 	postgresDeletePhoneNumberQuery  = `DELETE FROM user_phone WHERE user_id = $1 AND phone_number = $2`
 
 	// Email queries
-	postgresSelectEmailsQuery            = `SELECT email, is_primary FROM user_email WHERE user_id = $1 ORDER BY email`
-	postgresInsertEmailQuery             = `INSERT INTO user_email (user_id, email) VALUES ($1, $2)`
-	postgresInsertEmailIgnoreQuery       = `INSERT INTO user_email (user_id, email) VALUES ($1, $2) ON CONFLICT (user_id, email) DO NOTHING`
-	postgresDeleteEmailQuery             = `DELETE FROM user_email WHERE user_id = $1 AND email = $2`
-	postgresSelectPrimaryEmailQuery      = `SELECT email FROM user_email WHERE user_id = $1 AND is_primary`
-	postgresSelectUserIDByPrimaryQuery   = `SELECT user_id FROM user_email WHERE email = $1 AND is_primary`
-	postgresUpdateEmailSetPrimaryQuery   = `UPDATE user_email SET is_primary = TRUE WHERE user_id = $1 AND email = $2`
-	postgresUpdateEmailClearPrimaryQuery = `UPDATE user_email SET is_primary = FALSE WHERE user_id = $1 AND is_primary`
+	postgresSelectEmailsQuery                   = `SELECT email, is_primary, provisioned FROM user_email WHERE user_id = $1 ORDER BY email`
+	postgresInsertEmailQuery                    = `INSERT INTO user_email (user_id, email) VALUES ($1, $2)`
+	postgresInsertEmailIgnoreQuery              = `INSERT INTO user_email (user_id, email) VALUES ($1, $2) ON CONFLICT (user_id, email) DO NOTHING`
+	postgresDeleteEmailQuery                    = `DELETE FROM user_email WHERE user_id = $1 AND email = $2`
+	postgresSelectPrimaryEmailQuery             = `SELECT email FROM user_email WHERE user_id = $1 AND is_primary`
+	postgresSelectUserIDByPrimaryQuery          = `SELECT user_id FROM user_email WHERE email = $1 AND is_primary`
+	postgresUpdateEmailSetPrimaryQuery          = `UPDATE user_email SET is_primary = TRUE WHERE user_id = $1 AND email = $2`
+	postgresUpdateEmailClearPrimaryQuery        = `UPDATE user_email SET is_primary = FALSE WHERE user_id = $1 AND is_primary`
+	postgresSelectAllProvisionedEmailsQuery     = `SELECT user_id, email, is_primary FROM user_email WHERE provisioned ORDER BY user_id, email`
+	postgresInsertEmailProvisionedQuery         = `INSERT INTO user_email (user_id, email, provisioned) VALUES ($1, $2, TRUE) ON CONFLICT (user_id, email) DO NOTHING`
+	postgresDeleteProvisionedEmailQuery         = `DELETE FROM user_email WHERE user_id = $1 AND email = $2 AND provisioned`
+	postgresDeleteAllProvisionedEmailsQuery     = `DELETE FROM user_email WHERE provisioned`
+	postgresUpdateEmailClearPrimaryManagedQuery = `UPDATE user_email SET is_primary = FALSE WHERE user_id = $1 AND is_primary AND provisioned`
 
 	// Magic link queries (email verification + password reset)
 	postgresInsertMagicLinkQuery         = `INSERT INTO user_magic_link (token_hash, kind, user_id, email, expires, created) VALUES ($1, $2, $3, $4, $5, $6)`
@@ -279,6 +285,7 @@ var postgresQueries = queries{
 	selectUsers:                    postgresSelectUsersQuery,
 	selectUserCount:                postgresSelectUserCountQuery,
 	selectUserIDFromUsername:       postgresSelectUserIDFromUsernameQuery,
+	selectActiveUserIDFromUsername: postgresSelectActiveUserIDFromUsernameQuery,
 	insertUser:                     postgresInsertUserQuery,
 	updateUserPass:                 postgresUpdateUserPassQuery,
 	updateUserRole:                 postgresUpdateUserRoleQuery,
@@ -337,6 +344,11 @@ var postgresQueries = queries{
 	selectUserIDByPrimary:          postgresSelectUserIDByPrimaryQuery,
 	updateEmailSetPrimary:          postgresUpdateEmailSetPrimaryQuery,
 	updateEmailClearPrimary:        postgresUpdateEmailClearPrimaryQuery,
+	selectAllProvisionedEmails:     postgresSelectAllProvisionedEmailsQuery,
+	insertEmailProvisioned:         postgresInsertEmailProvisionedQuery,
+	deleteProvisionedEmail:         postgresDeleteProvisionedEmailQuery,
+	deleteAllProvisionedEmails:     postgresDeleteAllProvisionedEmailsQuery,
+	updateEmailClearPrimaryManaged: postgresUpdateEmailClearPrimaryManagedQuery,
 	insertMagicLink:                postgresInsertMagicLinkQuery,
 	selectMagicLinkByHash:          postgresSelectMagicLinkByHashQuery,
 	deleteMagicLinkByHash:          postgresDeleteMagicLinkByHashQuery,

@@ -22,6 +22,7 @@ var (
 	allowedTopicPatternRegex = regexp.MustCompile(`^[-_*A-Za-z0-9]{1,64}$`) // Adds '*' for wildcards!
 	allowedTierRegex         = regexp.MustCompile(`^[-_A-Za-z0-9]{1,64}$`)
 	allowedTokenRegex        = regexp.MustCompile(`^tk_[-_A-Za-z0-9]{29}$`) // Must be tokenLength-len(tokenPrefix)
+	validEmailRegex          = regexp.MustCompile(`^[^\s,;]+@[^\s,;]+$`)
 )
 
 // AllowedRole returns true if the given role can be used for new users
@@ -66,6 +67,13 @@ func ValidPasswordHash(hash string, minCost int) error {
 // ValidToken returns true if the given token matches the naming convention
 func ValidToken(token string) bool {
 	return allowedTokenRegex.MatchString(token)
+}
+
+// ValidEmail returns true if the given email address has a plausible shape (local@domain).
+// It deliberately mirrors the loose check used by the account/email HTTP API; it is a
+// syntax gate, not deliverability validation.
+func ValidEmail(email string) bool {
+	return validEmailRegex.MatchString(email)
 }
 
 // GenerateToken generates a new token with a prefix and a fixed length

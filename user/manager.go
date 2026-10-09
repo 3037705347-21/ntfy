@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/netip"
 	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -1785,16 +1786,16 @@ func (a *Manager) deleteExpiredMagicLinks() error {
 
 func (a *Manager) readEmail(rows *sql.Rows) (*Email, error) {
 	var address string
-	var primary bool
+	var primary, provisioned bool
 	if !rows.Next() {
 		return nil, ErrEmailNotFound
 	}
-	if err := rows.Scan(&address, &primary); err != nil {
+	if err := rows.Scan(&address, &primary, &provisioned); err != nil {
 		return nil, err
 	} else if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	return &Email{Address: address, Primary: primary}, nil
+	return &Email{Address: address, Primary: primary, Provisioned: provisioned}, nil
 }
 
 // ChangeBilling updates a user's billing fields
@@ -1812,7 +1813,7 @@ func (a *Manager) maybeProvisionUsersAccessAndTokens() error {
 	}
 	// If there is nothing to provision, remove any previously provisioned items using
 	// cheap targeted queries, avoiding the expensive Users() call that loads all users.
-	if len(a.config.Users) == 0 && len(a.config.Access) == 0 && len(a.config.Tokens) == 0 {
+	if len(a.config.Users) == 0 && len(a.config.Access) == 0 && len(a.config.Tokens) == 0 && len(a.config.Emails) == 0 {
 		return a.removeAllProvisioned()
 	}
 	// If there are provisioned users, do it the slow way
@@ -1837,6 +1838,9 @@ func (a *Manager) maybeProvisionUsersAccessAndTokens() error {
 		if err := a.maybeProvisionTokens(tx, provisionUsernames, existingTokens); err != nil {
 			return fmt.Errorf("failed to provision tokens: %v", err)
 		}
+		if err := a.maybeProvisionEmails(tx, existingUsers); err != nil {
+			return fmt.Errorf("failed to provision emails: %w", err)
+		}
 		return nil
 	})
 }
@@ -1849,6 +1853,11 @@ func (a *Manager) removeAllProvisioned() error {
 			return err
 		}
 		if _, err := tx.Exec(a.queries.deleteAllProvisionedTokens); err != nil {
+			return err
+		}
+		// Managed emails may live on non-provisioned (self-signed-up) accounts too, so they
+		// must be deleted explicitly; the user delete below only cascades its own children.
+		if _, err := tx.Exec(a.queries.deleteAllProvisionedEmails); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(a.queries.deleteUsersProvisioned); err != nil {
@@ -1963,6 +1972,271 @@ func (a *Manager) maybeProvisionTokens(tx *sql.Tx, provisionUsernames []string, 
 			if _, err := a.createTokenTx(tx, userID, token.Value, token.Label, time.Unix(0, 0), netip.IPv4Unspecified(), time.Unix(0, 0), 0, true); err != nil {
 				return err
 			}
+		}
+	}
+	return nil
+}
+
+// maybeProvisionEmails reconciles the declarative auth-emails configuration (config.Emails)
+// against the user_email table, inside the provisioning transaction. It runs after the
+// provisioned users, so entries may target both freshly provisioned accounts and accounts
+// users signed up for themselves.
+//
+// Ownership: a user_email row created by this reconcile carries provisioned = 1. The reconcile
+// only ever deletes such rows; addresses a user verified through the normal magic-link flow
+// (provisioned = 0) are never revoked. If the config lists an address the user already
+// self-verified, it is used as-is and ownership stays with the user (a later delist keeps it).
+//
+// Validation is all-or-nothing: any conflict aborts the whole provisioning transaction and
+// returns a ProvisioningConflictError describing every conflict with its list position.
+func (a *Manager) maybeProvisionEmails(tx *sql.Tx, existingUsers []*User) error {
+	type desiredState struct {
+		addresses []string
+		recovery  string
+	}
+	type recoveryEntry struct {
+		address string
+		line    int
+	}
+	type emailLocation struct {
+		line     int
+		username string
+	}
+	desired := make(map[string]*desiredState)
+	usernames := make([]string, 0)
+	recoveryByUser := make(map[string][]recoveryEntry)
+	locations := make(map[string][]emailLocation)
+	conflicts := make([]string, 0)
+
+	// Build desired state and run per-entry checks
+	for i, e := range a.config.Emails {
+		line := i + 1
+		if !AllowedUsername(e.Username) {
+			conflicts = append(conflicts, fmt.Sprintf("line %d: invalid username %q", line, e.Username))
+		}
+		if !ValidEmail(e.Address) {
+			conflicts = append(conflicts, fmt.Sprintf("line %d (%s): invalid email address %q", line, e.Username, e.Address))
+		}
+		d, ok := desired[e.Username]
+		if !ok {
+			d = &desiredState{}
+			desired[e.Username] = d
+			usernames = append(usernames, e.Username)
+		}
+		if !slices.Contains(d.addresses, e.Address) {
+			d.addresses = append(d.addresses, e.Address)
+		}
+		if e.Recovery {
+			recoveryByUser[e.Username] = append(recoveryByUser[e.Username], recoveryEntry{address: e.Address, line: line})
+		}
+		locations[e.Address] = append(locations[e.Address], emailLocation{line: line, username: e.Username})
+	}
+
+	// Conflict: one account configured with multiple recovery emails
+	for _, username := range usernames {
+		recs := recoveryByUser[username]
+		if len(recs) <= 1 {
+			continue
+		}
+		descriptions := make([]string, 0, len(recs))
+		for _, r := range recs {
+			descriptions = append(descriptions, fmt.Sprintf("%q (line %d)", r.address, r.line))
+		}
+		conflicts = append(conflicts, fmt.Sprintf("account %q has %d recovery emails configured, at most one is allowed: %s",
+			username, len(recs), strings.Join(descriptions, ", ")))
+	}
+	// Resolve the effective (single) recovery per account for the remaining checks
+	for _, username := range usernames {
+		if recs := recoveryByUser[username]; len(recs) == 1 {
+			desired[username].recovery = recs[0].address
+		}
+	}
+
+	// Conflict: same address assigned multiple times (to two accounts, or duplicated lines)
+	duplicateAddresses := make([]string, 0)
+	for address, locs := range locations {
+		if len(locs) > 1 {
+			duplicateAddresses = append(duplicateAddresses, address)
+		}
+	}
+	sort.Strings(duplicateAddresses)
+	for _, address := range duplicateAddresses {
+		locs := locations[address]
+		slices.SortFunc(locs, func(x, y emailLocation) int { return x.line - y.line })
+		descriptions := make([]string, 0, len(locs))
+		for _, l := range locs {
+			descriptions = append(descriptions, fmt.Sprintf("line %d (account %q)", l.line, l.username))
+		}
+		conflicts = append(conflicts, fmt.Sprintf("email %q is assigned %d times (%s); each email may be assigned to only one account",
+			address, len(locs), strings.Join(descriptions, ", ")))
+	}
+
+	// Resolve account names -> IDs (skipping already-flagged invalid usernames). Accounts may be
+	// provisioned (created earlier in this same transaction) or pre-existing, e.g. self-signed up.
+	userIDs := make(map[string]string)
+	for _, username := range usernames {
+		if !AllowedUsername(username) {
+			continue
+		}
+		var userID string
+		err := tx.QueryRow(a.queries.selectActiveUserIDFromUsername, username).Scan(&userID)
+		if errors.Is(err, sql.ErrNoRows) {
+			conflicts = append(conflicts, fmt.Sprintf("account %q does not exist; create it (e.g. 'ntfy user add' or via auth-users) before assigning emails to it", username))
+			continue
+		} else if err != nil {
+			return err
+		}
+		userIDs[username] = userID
+	}
+
+	// Conflict: a configured recovery email is already the primary (recovery) email elsewhere,
+	// i.e. assigning it here would hijack password recovery for another account.
+	namesByID := make(map[string]string)
+	for _, u := range existingUsers {
+		namesByID[u.ID] = u.Name
+	}
+	for _, username := range usernames {
+		recovery := desired[username].recovery
+		if recovery == "" {
+			continue
+		}
+		userID, resolvable := userIDs[username]
+		if !resolvable {
+			continue
+		}
+		var ownerID string
+		err := tx.QueryRow(a.queries.selectUserIDByPrimary, recovery).Scan(&ownerID)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue // Recovery address is nobody's primary yet
+		} else if err != nil {
+			return err
+		}
+		if ownerID != userID {
+			ownerName := namesByID[ownerID]
+			if ownerName == "" {
+				ownerName = ownerID // Should not happen; fall back to the ID so the message stays useful
+			}
+			conflicts = append(conflicts, fmt.Sprintf("recovery email %q for account %q is already the recovery email of account %q; remove it there first",
+				recovery, username, ownerName))
+		}
+	}
+
+	if len(conflicts) > 0 {
+		return &ProvisioningConflictError{Conflicts: conflicts}
+	}
+
+	// Reconcile each listed account
+	for _, username := range usernames {
+		userID := userIDs[username]
+		d := desired[username]
+
+		// Load current verified rows of the account
+		rows, err := tx.Query(a.queries.selectEmails, userID)
+		if err != nil {
+			return err
+		}
+		type rowState struct {
+			primary     bool
+			provisioned bool
+		}
+		existing := make(map[string]rowState)
+		currentPrimary := ""
+		for {
+			email, err := a.readEmail(rows)
+			if errors.Is(err, ErrEmailNotFound) {
+				break
+			} else if err != nil {
+				rows.Close()
+				return err
+			}
+			existing[email.Address] = rowState{primary: email.Primary, provisioned: email.Provisioned}
+			if email.Primary {
+				currentPrimary = email.Address
+			}
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+
+		// (a) The list no longer designates a recovery address for this account: demote the
+		//     current primary only if the config owns it. A self-verified primary is left alone.
+		if d.recovery == "" && currentPrimary != "" && existing[currentPrimary].provisioned {
+			if _, err := tx.Exec(a.queries.updateEmailClearPrimaryManaged, userID); err != nil {
+				return err
+			}
+			currentPrimary = ""
+		}
+
+		// (b) Revoke managed addresses that vanished from the list. Self-verified rows survive.
+		for address, st := range existing {
+			if st.provisioned && !slices.Contains(d.addresses, address) {
+				if _, err := tx.Exec(a.queries.deleteProvisionedEmail, userID, address); err != nil {
+					return err
+				}
+			}
+		}
+
+		// (c) Ensure every listed address exists as a verified email. Rows the user
+		//     self-verified first stay self-owned (ON CONFLICT DO NOTHING) and are thus never
+		//     revoked by a future delist.
+		for _, address := range d.addresses {
+			if _, err := tx.Exec(a.queries.insertEmailProvisioned, userID, address); err != nil {
+				return err
+			}
+		}
+
+		// (d) Move the recovery star to the configured address. Clearing first also demotes a
+		//     self-verified primary -- the address itself is NOT deleted, only the star moves,
+		//     so password recovery reliably goes to the configured account.
+		if d.recovery != "" && currentPrimary != d.recovery {
+			if _, err := tx.Exec(a.queries.updateEmailClearPrimary, userID); err != nil {
+				return err
+			}
+			res, err := tx.Exec(a.queries.updateEmailSetPrimary, userID, d.recovery)
+			if err != nil {
+				return err
+			}
+			affected, err := res.RowsAffected()
+			if err != nil {
+				return err
+			} else if affected == 0 {
+				return fmt.Errorf("recovery email %q not found on account %q after provisioning", d.recovery, username)
+			}
+		}
+	}
+
+	// Sweep managed rows from accounts dropped from the list entirely. Accounts still listed
+	// were already diffed per-row above; this only catches users with no entries anymore.
+	listedUserIDs := make(map[string]bool)
+	for _, id := range userIDs {
+		listedUserIDs[id] = true
+	}
+	rows, err := tx.Query(a.queries.selectAllProvisionedEmails)
+	if err != nil {
+		return err
+	}
+	type orphanRow struct {
+		userID  string
+		address string
+	}
+	orphans := make([]orphanRow, 0)
+	for rows.Next() {
+		var userID, address string
+		var primary bool
+		if err := rows.Scan(&userID, &address, &primary); err != nil {
+			rows.Close()
+			return err
+		}
+		if !listedUserIDs[userID] {
+			orphans = append(orphans, orphanRow{userID: userID, address: address})
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, orphan := range orphans {
+		if _, err := tx.Exec(a.queries.deleteProvisionedEmail, orphan.userID, orphan.address); err != nil {
+			return err
 		}
 	}
 	return nil

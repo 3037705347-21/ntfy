@@ -194,7 +194,11 @@ func (s *Server) handleAccountGet(w http.ResponseWriter, r *http.Request, v *vis
 			// Combine verified (with primary flag) and pending (unverified) into one list
 			emailInfos := make([]*apiAccountEmailInfo, 0, len(emails)+len(pendingEmails))
 			for _, email := range emails {
-				emailInfos = append(emailInfos, &apiAccountEmailInfo{Address: email.Address, Primary: email.Primary})
+				emailInfos = append(emailInfos, &apiAccountEmailInfo{
+					Address:     email.Address,
+					Primary:     email.Primary,
+					Provisioned: email.Provisioned,
+				})
 			}
 			for _, email := range pendingEmails {
 				emailInfos = append(emailInfos, &apiAccountEmailInfo{Address: email, Pending: true})

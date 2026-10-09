@@ -147,6 +147,11 @@
 # - auth-tokens is a list of access tokens that are automatically created when the server starts.
 #   Each entry is in the format "<username>:<token>[:<label>]", e.g. "phil:tk_1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef:My token".
 #   Use 'ntfy token generate' to generate a new access token.
+# - auth-emails is a list of verified/recovery emails assigned to existing accounts when the server starts.
+#   Each entry is in the format "<username>:<email>[:recovery]", e.g. "ben:ben@example.com:recovery".
+#   Entries removed from the list are revoked on restart; emails users verified themselves are kept.
+#   The whole list is rejected (server does not start) on duplicates, multiple recovery emails per
+#   account, unknown accounts, or recovery emails owned by another account.
 # - auth-access-cache enables an in-memory snapshot of the access control table that authorizes every
 #   request without a database round-trip.
 #
@@ -164,6 +169,7 @@
 # auth-users:
 # auth-access:
 # auth-tokens:
+# auth-emails:
 # auth-access-cache: false
 
 # If set, the X-Forwarded-For header (or whatever is configured in proxy-forwarded-header) is used to determine

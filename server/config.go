@@ -149,6 +149,7 @@ type Config struct {
 	AuthUsers                            []*user.User `hash:"-"`
 	AuthAccess                           map[string][]*user.Grant
 	AuthTokens                           map[string][]*user.Token `hash:"-"`
+	AuthEmails                           []*user.ProvisionedEmail `hash:"-"`
 	AuthBcryptCost                       int
 	AuthStatsQueueWriterInterval         time.Duration
 	AuthAccessCacheEnabled               bool          // Enables the in-memory ACL cache (high volume servers only)

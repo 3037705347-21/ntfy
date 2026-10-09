@@ -2,6 +2,7 @@ package user
 
 import (
 	"errors"
+	"fmt"
 	"net/netip"
 	"strings"
 	"time"
@@ -187,8 +188,20 @@ type Reservation struct {
 // Email is a verified email address on a user account, along with whether it is the user's
 // designated primary (recovery) address.
 type Email struct {
-	Address string
-	Primary bool
+	Address     string
+	Primary     bool
+	Provisioned bool // Admin-managed via the auth-emails config; reconciled (and revoked) declaratively
+}
+
+// ProvisionedEmail is one entry of the declarative auth-emails configuration: the administrator
+// assigns Address to the account named Username as a verified email. With Recovery set, it is
+// also made the account's primary (password-recovery) address; at most one per account.
+// Unlike self-verified addresses, entries are owned by the config: entries removed from the
+// list are revoked on the next reconcile, but only entries the config itself created are.
+type ProvisionedEmail struct {
+	Username string
+	Address  string
+	Recovery bool
 }
 
 // Emails is a list of verified email addresses for a user.
@@ -304,8 +317,9 @@ type Config struct {
 	DefaultAccess                Permission          // Default permission if no ACL matches
 	ProvisionEnabled             bool                // Hack: Enable auto-provisioning of users and access grants, disabled for "ntfy user" commands
 	Users                        []*User             // Predefined users to create on startup
-	Access                       map[string][]*Grant // Predefined access grants to create on startup (username -> []*Grant)
-	Tokens                       map[string][]*Token // Predefined users to create on startup (username -> []*Token)
+	Access                       map[string][]*Grant // Predefined access grants to create on startup
+	Tokens                       map[string][]*Token // Predefined users to create on startup
+	Emails                       []*ProvisionedEmail // Predefined verified/recovery emails to reconcile on startup
 	QueueWriterInterval          time.Duration       // Interval for the async queue writer to flush stats and token updates to the database
 	BcryptCost                   int                 // Cost of generated passwords; lowering makes testing faster
 	AccessCacheEnabled           bool                // Enables the in-memory ACL cache (high volume servers only)
@@ -315,25 +329,43 @@ type Config struct {
 
 // Error constants used by the package
 var (
-	ErrUnauthenticated        = errors.New("unauthenticated")
-	ErrUnauthorized           = errors.New("unauthorized")
-	ErrInvalidArgument        = errors.New("invalid argument")
-	ErrUserNotFound           = errors.New("user not found")
-	ErrUserExists             = errors.New("user already exists")
-	ErrPasswordHashInvalid    = errors.New("password hash must be a bcrypt hash, use 'ntfy user hash' to generate")
-	ErrPasswordHashWeak       = errors.New("password hash too weak, use 'ntfy user hash' to generate")
-	ErrTierNotFound           = errors.New("tier not found")
-	ErrTokenNotFound          = errors.New("token not found")
-	ErrPhoneNumberNotFound    = errors.New("phone number not found")
-	ErrTooManyReservations    = errors.New("new tier has lower reservation limit")
-	ErrPhoneNumberExists      = errors.New("phone number already exists")
-	ErrEmailNotFound          = errors.New("email not found")
-	ErrEmailExists            = errors.New("email already exists")
-	ErrEmailPrimaryElsewhere  = errors.New("email is the primary email on another account")
-	ErrMagicLinkNotFound      = errors.New("magic link not found")
-	ErrProvisionedUserChange  = errors.New("cannot change or delete provisioned user")
-	ErrProvisionedTokenChange = errors.New("cannot change or delete provisioned token")
+	ErrUnauthenticated           = errors.New("unauthenticated")
+	ErrUnauthorized              = errors.New("unauthorized")
+	ErrInvalidArgument           = errors.New("invalid argument")
+	ErrUserNotFound              = errors.New("user not found")
+	ErrUserExists                = errors.New("user already exists")
+	ErrPasswordHashInvalid       = errors.New("password hash must be a bcrypt hash, use 'ntfy user hash' to generate")
+	ErrPasswordHashWeak          = errors.New("password hash too weak, use 'ntfy user hash' to generate")
+	ErrTierNotFound              = errors.New("tier not found")
+	ErrTokenNotFound             = errors.New("token not found")
+	ErrPhoneNumberNotFound       = errors.New("phone number not found")
+	ErrTooManyReservations       = errors.New("new tier has lower reservation limit")
+	ErrPhoneNumberExists         = errors.New("phone number already exists")
+	ErrEmailNotFound             = errors.New("email not found")
+	ErrEmailExists               = errors.New("email already exists")
+	ErrEmailPrimaryElsewhere     = errors.New("email is the primary email on another account")
+	ErrMagicLinkNotFound         = errors.New("magic link not found")
+	ErrProvisionedUserChange     = errors.New("cannot change or delete provisioned user")
+	ErrProvisionedTokenChange    = errors.New("cannot change or delete provisioned token")
+	ErrEmailProvisioningConflict = errors.New("conflicts in declarative auth-emails configuration")
 )
+
+// ProvisioningConflictError aggregates every problem found while validating the declarative
+// auth-emails configuration. Reconciliation is all-or-nothing: when this error is returned,
+// the entire provisioning run was rolled back and no email change took effect. Each entry in
+// Conflicts pinpoints one offending assignment, including its position in the config list.
+type ProvisioningConflictError struct {
+	Conflicts []string
+}
+
+func (e *ProvisioningConflictError) Error() string {
+	return fmt.Sprintf("%s (%d conflict(s)):\n - %s", ErrEmailProvisioningConflict, len(e.Conflicts), strings.Join(e.Conflicts, "\n - "))
+}
+
+// Unwrap exposes ErrEmailProvisioningConflict for errors.Is lookups.
+func (e *ProvisioningConflictError) Unwrap() error {
+	return ErrEmailProvisioningConflict
+}
 
 // queries holds the database-specific SQL queries
 type queries struct {
@@ -347,6 +379,7 @@ type queries struct {
 	selectUsers                    string
 	selectUserCount                string
 	selectUserIDFromUsername       string
+	selectActiveUserIDFromUsername string // Like selectUserIDFromUsername, but excludes soft-deleted accounts
 	insertUser                     string
 	updateUserPass                 string
 	updateUserRole                 string
@@ -407,14 +440,19 @@ type queries struct {
 	deletePhoneNumber  string
 
 	// Email queries
-	selectEmails            string
-	insertEmail             string
-	insertEmailIgnore       string // Idempotent insert (ON CONFLICT DO NOTHING) used inside VerifyEmail
-	deleteEmail             string
-	selectPrimaryEmail      string
-	selectUserIDByPrimary   string
-	updateEmailSetPrimary   string
-	updateEmailClearPrimary string
+	selectEmails                   string
+	insertEmail                    string
+	insertEmailIgnore              string // Idempotent insert (ON CONFLICT DO NOTHING) used inside VerifyEmail
+	deleteEmail                    string
+	selectPrimaryEmail             string
+	selectUserIDByPrimary          string
+	updateEmailSetPrimary          string
+	updateEmailClearPrimary        string
+	selectAllProvisionedEmails     string // All admin-managed (user_id, email, is_primary) rows, for reconcile sweeps
+	insertEmailProvisioned         string // Insert an admin-managed verified email (provisioned = 1), no-op if the row already exists
+	deleteProvisionedEmail         string // Delete one admin-managed row; self-verified rows are left untouched
+	deleteAllProvisionedEmails     string // Delete every admin-managed row (empty-config fast path)
+	updateEmailClearPrimaryManaged string // Demote the admin-managed primary of a user (self-verified primaries are left untouched)
 
 	// Magic link queries (email verification + password reset)
 	insertMagicLink              string

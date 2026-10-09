@@ -84,12 +84,13 @@ const (
 			FOREIGN KEY (user_id) REFERENCES user (id) ON DELETE CASCADE
 		);
 		CREATE TABLE IF NOT EXISTS user_email (
-			user_id TEXT NOT NULL,
-			email TEXT NOT NULL,
-			is_primary INT NOT NULL DEFAULT (0),
-			PRIMARY KEY (user_id, email),
-			FOREIGN KEY (user_id) REFERENCES user (id) ON DELETE CASCADE
-		);
+		user_id TEXT NOT NULL,
+		email TEXT NOT NULL,
+		is_primary INT NOT NULL DEFAULT (0),
+		provisioned INT NOT NULL DEFAULT (0),
+		PRIMARY KEY (user_id, email),
+		FOREIGN KEY (user_id) REFERENCES user (id) ON DELETE CASCADE
+	);
 		CREATE UNIQUE INDEX idx_user_email_primary_user ON user_email (user_id) WHERE is_primary = 1;
 		CREATE UNIQUE INDEX idx_user_email_primary_addr ON user_email (email) WHERE is_primary = 1;
 		CREATE TABLE IF NOT EXISTS user_magic_link (
@@ -114,7 +115,7 @@ const (
 )
 
 const (
-	sqliteCurrentSchemaVersion = 9
+	sqliteCurrentSchemaVersion = 10
 )
 
 // Schema migrations for SQLite
@@ -348,6 +349,13 @@ const (
 		CREATE UNIQUE INDEX idx_user_token ON user_token (token);
 	`
 
+	// 9 -> 10: Mark admin-managed (declarative) emails. The auth-emails config reconciles only
+	// rows with provisioned = 1, so emails users verified themselves (default 0) are never
+	// revoked by config changes.
+	sqliteMigrate9To10UpdateQueries = `
+		ALTER TABLE user_email ADD COLUMN provisioned INT NOT NULL DEFAULT (0);
+	`
+
 	// 8 -> 9: Repair the user_phone foreign key. The 5 -> 6 migration renamed user to
 	// user_old, which rewrote user_phone's REFERENCES clause to user_old -- a table that was
 	// then dropped (the rebuilt tables got correct fresh foreign keys; user_phone was the only
@@ -382,6 +390,7 @@ var (
 		6: schema.AsMigrateFunc(sqliteMigrate6To7UpdateQueries),
 		7: schema.AsMigrateFunc(sqliteMigrate7To8UpdateQueries),
 		8: schema.AsMigrateFunc(sqliteMigrate8To9UpdateQueries),
+		9: schema.AsMigrateFunc(sqliteMigrate9To10UpdateQueries),
 	}
 )
 

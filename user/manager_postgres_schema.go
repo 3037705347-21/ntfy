@@ -72,11 +72,12 @@ const (
 			PRIMARY KEY (user_id, phone_number)
 		);
 		CREATE TABLE IF NOT EXISTS user_email (
-			user_id TEXT NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,
-			email TEXT NOT NULL,
-			is_primary BOOLEAN NOT NULL DEFAULT FALSE,
-			PRIMARY KEY (user_id, email)
-		);
+		user_id TEXT NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,
+		email TEXT NOT NULL,
+		is_primary BOOLEAN NOT NULL DEFAULT FALSE,
+		provisioned BOOLEAN NOT NULL DEFAULT FALSE,
+		PRIMARY KEY (user_id, email)
+	);
 		CREATE UNIQUE INDEX idx_user_email_primary_user ON user_email (user_id) WHERE is_primary;
 		CREATE UNIQUE INDEX idx_user_email_primary_addr ON user_email (email) WHERE is_primary;
 		CREATE TABLE IF NOT EXISTS user_magic_link (
@@ -96,7 +97,7 @@ const (
 )
 
 const (
-	postgresCurrentSchemaVersion = 9
+	postgresCurrentSchemaVersion = 10
 )
 
 const (
@@ -125,6 +126,13 @@ const (
 		);
 		CREATE INDEX idx_magic_link_user_kind ON user_magic_link (user_id, kind);
 	`
+
+	// 9 -> 10: Mark admin-managed (declarative) emails. The auth-emails config reconciles only
+	// rows with provisioned = TRUE, so emails users verified themselves (default FALSE) are
+	// never revoked by config changes.
+	postgresMigrate9To10UpdateQueries = `
+		ALTER TABLE user_email ADD COLUMN provisioned BOOLEAN NOT NULL DEFAULT FALSE;
+	`
 )
 
 var (
@@ -136,5 +144,6 @@ var (
 		6: schema.AsMigrateFunc(postgresMigrate6To7UpdateQueries),
 		7: schema.AsMigrateFunc(postgresMigrate7To8UpdateQueries),
 		8: schema.NopMigrateFunc, // 8 -> 9 repairs a SQLite-only foreign key defect; nothing to do on Postgres
+		9: schema.AsMigrateFunc(postgresMigrate9To10UpdateQueries),
 	}
 )
