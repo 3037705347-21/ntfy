@@ -478,3 +478,31 @@ func TestServer_Cluster_GapWindowWidensAMarkerFromTheSameSecond(t *testing.T) {
 	require.Len(t, messages, 2)
 	require.Equal(t, "from node A, lost", messages[0].Message)
 }
+
+func TestServer_Cluster_GapWindowReplaysOnlyTheNewestVersionOfAnEditedMessage(t *testing.T) {
+	// An edited message is a sequence of versions sharing a sequence id, and the clients keep
+	// whichever version they STORED last, not the newest: a client that already holds v2 and is
+	// then sent v1 retires v2 and shows v1. A widened replay reaches back past the client's
+	// marker, which is exactly when it may hold v2 already, so it carries one message per
+	// sequence, the newest. A plain poll still returns every version, as documented.
+	s := newTestServer(t, newTestConfig(t, ""))
+	v1 := model.NewDefaultMessage("mytopic", "first draft")
+	v1.Time = time.Now().Add(-10 * time.Second).Unix()
+	v2 := model.NewDefaultMessage("mytopic", "final text")
+	v2.SequenceID = v1.ID
+	other := model.NewDefaultMessage("mytopic", "unrelated")
+	require.Nil(t, s.messageCache.AddMessages([]*model.Message{v1, v2, other}))
+	poll := func() []*model.Message {
+		return toMessages(t, request(t, s, "GET", "/mytopic/json?poll=1&since="+other.ID, "", nil).Body.String())
+	}
+	require.Empty(t, poll()) // The marker is past everything
+
+	s.handleDeliveryGap([]string{"mytopic"}, v1.Time)
+	messages := poll()
+	require.Len(t, messages, 2)
+	require.Equal(t, "final text", messages[0].Message)
+	require.Equal(t, "unrelated", messages[1].Message)
+
+	// A plain poll is unchanged: every version, as documented
+	require.Len(t, toMessages(t, request(t, s, "GET", "/mytopic/json?poll=1&since=all", "", nil).Body.String()), 3)
+}

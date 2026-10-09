@@ -91,29 +91,54 @@ func (s *Server) openGapWindow(topics []string, since int64) {
 // It never narrows a marker, so a client that has been away longer than the gap still gets its
 // history. A marker from the gap's own second is widened: times are whole seconds, and the lost
 // message can sit in that second behind a lower row id, where since=<id> cannot see it.
-func (s *Server) widenSince(topicID string, since model.SinceMarker) model.SinceMarker {
+func (s *Server) widenSince(topicID string, since model.SinceMarker) (model.SinceMarker, bool) {
 	if since.IsNone() || since.IsAll() {
-		return since // Nothing to replay, or everything already
+		return since, false // Nothing to replay, or everything already
 	}
 	s.mu.RLock()
 	gap, ok := s.gapWindows[topicID]
 	s.mu.RUnlock()
 	if !ok || gap.expires < time.Now().Unix() {
-		return since
+		return since, false
 	}
 	if since.IsID() {
 		m, err := s.messageCache.Message(since.ID())
 		if err != nil {
-			return since // Unknown marker: the replay falls back to the topic's history anyway
+			return since, false // Unknown marker: the replay falls back to the topic's history anyway
 		}
 		if m.Time < gap.since {
-			return since // Older than the gap: the marker already reaches it
+			return since, false // Older than the gap: the marker already reaches it
 		}
 	} else if !since.IsLatest() && since.Time().Unix() < gap.since {
-		return since
+		return since, false
 	}
 	log.Tag(tagCluster).Debug("Replaying topic %s from the gap at %v instead of the client's marker", topicID, time.Unix(gap.since, 0))
-	return model.NewSinceTime(gap.since)
+	return model.NewSinceTime(gap.since), true
+}
+
+// newestPerSequence keeps one message per sequence id, the newest, in the order given (oldest
+// first). A widened replay reaches back past the client's marker, so the client may already hold
+// a newer version of an edited message than the ones replayed, and the clients keep whichever
+// version they STORED last: sent an older one, they retire the newer one and show the older one.
+// A normal replay is not collapsed, since a poll is documented to return every version.
+func newestPerSequence(messages []*model.Message) []*model.Message {
+	sequence := func(m *model.Message) string {
+		if m.SequenceID == "" {
+			return m.ID // Never edited: a sequence of one
+		}
+		return m.SequenceID
+	}
+	newest := make(map[string]*model.Message, len(messages))
+	for _, m := range messages {
+		newest[sequence(m)] = m // Oldest first, so the last write per sequence is the newest
+	}
+	out := make([]*model.Message, 0, len(newest))
+	for _, m := range messages {
+		if newest[sequence(m)] == m {
+			out = append(out, m)
+		}
+	}
+	return out
 }
 
 // closeGappedSubscribers closes the subscribers of the given topics, so their clients reconnect

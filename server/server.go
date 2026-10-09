@@ -1853,9 +1853,13 @@ func (s *Server) sendOldMessages(w http.ResponseWriter, topics []*topic, since m
 	messages := make([]*model.Message, 0)
 	truncated := false
 	for _, t := range topics {
-		topicMessages, topicTruncated, err := s.messageCache.MessagesCapped(t.ID, s.widenSince(t.ID, since), scheduled, s.config.MessagePollSizeLimit)
+		topicSince, widened := s.widenSince(t.ID, since)
+		topicMessages, topicTruncated, err := s.messageCache.MessagesCapped(t.ID, topicSince, scheduled, s.config.MessagePollSizeLimit)
 		if err != nil {
 			return err
+		}
+		if widened {
+			topicMessages = newestPerSequence(topicMessages) // The client may already hold a newer version (see newestPerSequence)
 		}
 		truncated = truncated || topicTruncated
 		messages = append(messages, topicMessages...)
@@ -1865,7 +1869,6 @@ func (s *Server) sendOldMessages(w http.ResponseWriter, topics []*topic, since m
 	sort.SliceStable(messages, func(i, j int) bool {
 		return messages[i].Time < messages[j].Time
 	})
-	messages = newestPerSequence(messages)
 	// Must be set before the first message is written, or the header is already on the wire. On the
 	// WebSocket path the response has been hijacked by then, so this is a no-op there.
 	if truncated {
@@ -1877,30 +1880,6 @@ func (s *Server) sendOldMessages(w http.ResponseWriter, topics []*topic, since m
 		}
 	}
 	return nil
-}
-
-// newestPerSequence keeps one message per sequence id, the newest, in the order given (oldest
-// first). The clients keep whichever version of a sequence they STORED last, not the newest, so a
-// client that already holds a newer version and is then sent an older one shows the older one.
-// A replay therefore never carries a version older than the newest it has.
-func newestPerSequence(messages []*model.Message) []*model.Message {
-	sequence := func(m *model.Message) string {
-		if m.SequenceID == "" {
-			return m.ID // Never edited: a sequence of one
-		}
-		return m.SequenceID
-	}
-	newest := make(map[string]*model.Message, len(messages))
-	for _, m := range messages {
-		newest[sequence(m)] = m // Oldest first, so the last write per sequence is the newest
-	}
-	out := make([]*model.Message, 0, len(newest))
-	for _, m := range messages {
-		if newest[sequence(m)] == m {
-			out = append(out, m)
-		}
-	}
-	return out
 }
 
 // parseSince returns a timestamp identifying the time span from which cached messages should be received.
