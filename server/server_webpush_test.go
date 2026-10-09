@@ -19,6 +19,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"heckel.io/ntfy/v2/user"
 	"heckel.io/ntfy/v2/util"
+	wpush "heckel.io/ntfy/v2/webpush"
 )
 
 const (
@@ -354,6 +355,243 @@ func TestServer_WebPush_Expiry(t *testing.T) {
 			return len(subs) == 0
 		})
 	})
+}
+
+// TestServer_WebPush_Publish_RetryThenDeliver verifies that a retryable push-service failure
+// (500) leaves the subscription and a pending ledger row in place, that a later worker pass
+// delivers the same message (exactly one retry), and that confirmed messages are never sent again.
+func TestServer_WebPush_Publish_RetryThenDeliver(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, databaseURL string) {
+		s := newTestServer(t, newTestConfigWithWebPush(t, databaseURL))
+
+		var status atomic.Int32
+		status.Store(http.StatusInternalServerError)
+		var requests atomic.Int32
+		pushService := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, err := io.ReadAll(r.Body)
+			require.Nil(t, err)
+			requests.Add(1)
+			w.WriteHeader(int(status.Load()))
+		}))
+		defer pushService.Close()
+
+		endpoint := pushService.URL + "/push-receive"
+		addSubscription(t, s, endpoint, "test-topic")
+		rr := request(t, s, "POST", "/test-topic", "web push test", nil)
+		messageID := publishedMessageID(t, rr)
+
+		// First attempt fails with 500: row is pending, subscription survives
+		waitFor(t, func() bool { return requests.Load() == 1 })
+		waitForDeliveryRetryScheduled(t, s, endpoint, messageID)
+		requireSubscriptionCount(t, s, "test-topic", 1)
+		delivery := requireDelivery(t, s, endpoint, messageID)
+		require.Equal(t, wpush.DeliveryStatusPending, delivery.Status)
+		require.Equal(t, 1, delivery.Attempts)
+		require.NotEmpty(t, delivery.LastError)
+
+		// Push service recovers; the next worker pass delivers the pending row
+		status.Store(http.StatusOK)
+		require.Nil(t, s.webPush.SetDeliveryNextAttemptAt(endpoint, messageID, time.Now().Add(-time.Minute).Unix()))
+		require.Nil(t, s.processWebPushDeliveries())
+		waitFor(t, func() bool { return requests.Load() == 2 })
+		waitForDeliveryStatus(t, s, endpoint, messageID, wpush.DeliveryStatusDelivered)
+		delivery = requireDelivery(t, s, endpoint, messageID)
+		require.Equal(t, wpush.DeliveryStatusDelivered, delivery.Status)
+		require.Equal(t, 2, delivery.Attempts)
+		requireSubscriptionCount(t, s, "test-topic", 1)
+
+		// Further worker ticks must never push the confirmed message again
+		require.Nil(t, s.webPush.SetDeliveryNextAttemptAt(endpoint, messageID, time.Now().Add(-time.Minute).Unix()))
+		require.Nil(t, s.processWebPushDeliveries())
+		require.Nil(t, s.processWebPushDeliveries())
+		require.Equal(t, int32(2), requests.Load())
+	})
+}
+
+// TestServer_WebPush_Publish_TransientNetworkError verifies that a dead push service
+// (connection reset) does not delete the subscription anymore: the row is retried and delivered
+// once the service is reachable again.
+func TestServer_WebPush_Publish_TransientNetworkError(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, databaseURL string) {
+		s := newTestServer(t, newTestConfigWithWebPush(t, databaseURL))
+
+		var fail atomic.Bool
+		fail.Store(true)
+		var requests atomic.Int32
+		pushService := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.ReadAll(r.Body)
+			requests.Add(1)
+			if fail.Load() {
+				if hijacker, ok := w.(http.Hijacker); ok {
+					if conn, _, err := hijacker.Hijack(); err == nil {
+						conn.Close() // Simulate the connection dying before any response
+						return
+					}
+				}
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer pushService.Close()
+
+		endpoint := pushService.URL + "/push-receive"
+		addSubscription(t, s, endpoint, "test-topic")
+		rr := request(t, s, "POST", "/test-topic", "web push test", nil)
+		messageID := publishedMessageID(t, rr)
+
+		waitFor(t, func() bool { return requests.Load() == 1 })
+		waitForDeliveryRetryScheduled(t, s, endpoint, messageID)
+		requireSubscriptionCount(t, s, "test-topic", 1) // Not removed despite the network error
+		delivery := requireDelivery(t, s, endpoint, messageID)
+		require.Equal(t, wpush.DeliveryStatusPending, delivery.Status)
+
+		// Service comes back: retry succeeds
+		fail.Store(false)
+		require.Nil(t, s.webPush.SetDeliveryNextAttemptAt(endpoint, messageID, time.Now().Add(-time.Minute).Unix()))
+		require.Nil(t, s.processWebPushDeliveries())
+		waitFor(t, func() bool { return requests.Load() == 2 })
+		waitForDeliveryStatus(t, s, endpoint, messageID, wpush.DeliveryStatusDelivered)
+		require.Equal(t, wpush.DeliveryStatusDelivered, requireDelivery(t, s, endpoint, messageID).Status)
+	})
+}
+
+// TestServer_WebPush_Publish_RestartResumesPending verifies that pending rows survive a server
+// restart: a fresh server process reusing the same database resumes and delivers an unconfirmed
+// message without the publisher doing anything.
+func TestServer_WebPush_Publish_RestartResumesPending(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, databaseURL string) {
+		conf := newTestConfigWithWebPush(t, databaseURL)
+		s := newTestServer(t, conf)
+
+		var status atomic.Int32
+		status.Store(http.StatusInternalServerError)
+		var requests atomic.Int32
+		pushService := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.ReadAll(r.Body)
+			requests.Add(1)
+			w.WriteHeader(int(status.Load()))
+		}))
+		defer pushService.Close()
+
+		endpoint := pushService.URL + "/push-receive"
+		addSubscription(t, s, endpoint, "test-topic")
+		rr := request(t, s, "POST", "/test-topic", "web push test", nil)
+		messageID := publishedMessageID(t, rr)
+		waitFor(t, func() bool { return requests.Load() == 1 })
+		waitForDeliveryRetryScheduled(t, s, endpoint, messageID)
+
+		// Backoff would schedule the retry later; simulate time passing, then "restart" the server
+		require.Nil(t, s.webPush.SetDeliveryNextAttemptAt(endpoint, messageID, time.Now().Add(-time.Minute).Unix()))
+		s.Stop()
+		status.Store(http.StatusOK)
+
+		restartedConf := newTestConfig(t, databaseURL)
+		restartedConf.WebPushEmailAddress = conf.WebPushEmailAddress
+		restartedConf.WebPushPrivateKey = conf.WebPushPrivateKey
+		restartedConf.WebPushPublicKey = conf.WebPushPublicKey
+		restartedConf.WebPushFile = conf.WebPushFile
+		s2 := newTestServer(t, restartedConf)
+
+		// This is the immediate post-startup pass runWebPushDeliveryWorker performs
+		require.Nil(t, s2.processWebPushDeliveries())
+		waitFor(t, func() bool { return requests.Load() == 2 })
+		waitForDeliveryStatus(t, s2, endpoint, messageID, wpush.DeliveryStatusDelivered)
+		require.Equal(t, wpush.DeliveryStatusDelivered, requireDelivery(t, s2, endpoint, messageID).Status)
+		requireSubscriptionCount(t, s2, "test-topic", 1)
+	})
+}
+
+// TestServer_WebPush_Publish_410CascadesLedger verifies that a dead subscription (410 Gone) is
+// removed and its delivery ledger rows are cleaned up with it.
+func TestServer_WebPush_Publish_410CascadesLedger(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, databaseURL string) {
+		s := newTestServer(t, newTestConfigWithWebPush(t, databaseURL))
+
+		pushService := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.ReadAll(r.Body)
+			w.WriteHeader(http.StatusGone)
+		}))
+		defer pushService.Close()
+
+		endpoint := pushService.URL + "/push-receive"
+		addSubscription(t, s, endpoint, "test-topic", "test-topic-abc")
+		rr := request(t, s, "POST", "/test-topic", "web push test", nil)
+		messageID := publishedMessageID(t, rr)
+
+		// Wait until the invalid subscription is actually removed; the ledger-row absence alone is
+		// an ambiguous gate because the row may not have been enqueued yet on a slow database.
+		waitFor(t, func() bool {
+			subs, err := s.webPush.SubscriptionsForTopic("test-topic")
+			require.Nil(t, err)
+			return len(subs) == 0
+		})
+		requireSubscriptionCount(t, s, "test-topic", 0)
+		requireSubscriptionCount(t, s, "test-topic-abc", 0)
+		_, err := s.webPush.Delivery(endpoint, messageID)
+		require.ErrorIs(t, err, wpush.ErrWebPushDeliveryNotFound)
+	})
+}
+
+// TestServer_WebPush_DeliveryCleanup verifies the manager-side ledger maintenance prunes old
+// delivered rows and sweeps their now-orphaned payloads.
+func TestServer_WebPush_DeliveryCleanup(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, databaseURL string) {
+		conf := newTestConfigWithWebPush(t, databaseURL)
+		conf.WebPushDeliveryRetentionDuration = 0 // Every terminal row is immediately old enough to prune
+		s := newTestServer(t, conf)
+
+		pushService := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.ReadAll(r.Body)
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer pushService.Close()
+
+		endpoint := pushService.URL + "/push-receive"
+		addSubscription(t, s, endpoint, "test-topic")
+		rr := request(t, s, "POST", "/test-topic", "web push test", nil)
+		messageID := publishedMessageID(t, rr)
+		waitForDeliveryStatus(t, s, endpoint, messageID, wpush.DeliveryStatusDelivered)
+
+		require.Nil(t, s.cleanupWebPushDeliveries())
+		_, err := s.webPush.Delivery(endpoint, messageID)
+		require.ErrorIs(t, err, wpush.ErrWebPushDeliveryNotFound)
+	})
+}
+
+func waitForDeliveryStatus(t *testing.T, s *Server, endpoint, messageID string, status int) {
+	t.Helper()
+	waitFor(t, func() bool {
+		d, err := s.webPush.Delivery(endpoint, messageID)
+		return err == nil && d.Status == status
+	})
+}
+
+// waitForDeliveryRetryScheduled waits until the first failed attempt has been written back as a
+// scheduled retry (attempt counter incremented and error recorded).
+func waitForDeliveryRetryScheduled(t *testing.T, s *Server, endpoint, messageID string) {
+	t.Helper()
+	waitFor(t, func() bool {
+		d, err := s.webPush.Delivery(endpoint, messageID)
+		return err == nil && d.Attempts == 1 && d.LastError != ""
+	})
+}
+
+func publishedMessageID(t *testing.T, rr *httptest.ResponseRecorder) string {
+	t.Helper()
+	var published struct {
+		ID string `json:"id"`
+	}
+	require.Nil(t, json.Unmarshal(rr.Body.Bytes(), &published))
+	require.NotEmpty(t, published.ID)
+	return published.ID
+}
+
+func requireDelivery(t *testing.T, s *Server, endpoint, messageID string) *wpush.Delivery {
+	t.Helper()
+	delivery, err := s.webPush.Delivery(endpoint, messageID)
+	require.Nil(t, err)
+	return delivery
 }
 
 func payloadForTopics(t *testing.T, topics []string, endpoint string) string {

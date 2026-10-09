@@ -492,6 +492,7 @@ func (s *Server) Run() error {
 	go s.runStatsResetter()
 	go s.runDelayedSender()
 	go s.runFirebaseKeepaliver()
+	go s.runWebPushDeliveryWorker()
 
 	return <-errChan
 }

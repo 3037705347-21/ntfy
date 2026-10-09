@@ -125,6 +125,8 @@ var flagsServe = append(
 	altsrc.NewStringFlag(&cli.StringFlag{Name: "web-push-startup-queries", Aliases: []string{"web_push_startup_queries"}, EnvVars: []string{"NTFY_WEB_PUSH_STARTUP_QUERIES"}, Usage: "queries run when the web push database is initialized"}),
 	altsrc.NewStringFlag(&cli.StringFlag{Name: "web-push-expiry-duration", Aliases: []string{"web_push_expiry_duration"}, EnvVars: []string{"NTFY_WEB_PUSH_EXPIRY_DURATION"}, Value: util.FormatDuration(server.DefaultWebPushExpiryDuration), Usage: "automatically expire unused subscriptions after this time"}),
 	altsrc.NewStringFlag(&cli.StringFlag{Name: "web-push-expiry-warning-duration", Aliases: []string{"web_push_expiry_warning_duration"}, EnvVars: []string{"NTFY_WEB_PUSH_EXPIRY_WARNING_DURATION"}, Value: util.FormatDuration(server.DefaultWebPushExpiryWarningDuration), Usage: "send web push warning notification after this time before expiring unused subscriptions"}),
+	altsrc.NewStringFlag(&cli.StringFlag{Name: "web-push-delivery-interval", Aliases: []string{"web_push_delivery_interval"}, EnvVars: []string{"NTFY_WEB_PUSH_DELIVERY_INTERVAL"}, Value: util.FormatDuration(server.DefaultWebPushDeliveryInterval), Usage: "how often to retry web push messages that have not been confirmed by the push service"}),
+	altsrc.NewStringFlag(&cli.StringFlag{Name: "web-push-delivery-retention-duration", Aliases: []string{"web_push_delivery_retention_duration"}, EnvVars: []string{"NTFY_WEB_PUSH_DELIVERY_RETENTION_DURATION"}, Value: util.FormatDuration(server.DefaultWebPushDeliveryRetentionDuration), Usage: "how long to keep delivered or failed-for-good web push delivery records before pruning them"}),
 )
 
 var cmdServe = &cli.Command{
@@ -174,6 +176,8 @@ func execServe(c *cli.Context) error {
 	webPushStartupQueries := c.String("web-push-startup-queries")
 	webPushExpiryDurationStr := c.String("web-push-expiry-duration")
 	webPushExpiryWarningDurationStr := c.String("web-push-expiry-warning-duration")
+	webPushDeliveryIntervalStr := c.String("web-push-delivery-interval")
+	webPushDeliveryRetentionDurationStr := c.String("web-push-delivery-retention-duration")
 	cacheFile := c.String("cache-file")
 	cacheDurationStr := c.String("cache-duration")
 	cacheStartupQueries := c.String("cache-startup-queries")
@@ -294,6 +298,14 @@ func execServe(c *cli.Context) error {
 	if err != nil {
 		return fmt.Errorf("invalid web push expiry warning duration: %s", webPushExpiryWarningDurationStr)
 	}
+	webPushDeliveryInterval, err := util.ParseDuration(webPushDeliveryIntervalStr)
+	if err != nil {
+		return fmt.Errorf("invalid web push delivery interval: %s", webPushDeliveryIntervalStr)
+	}
+	webPushDeliveryRetentionDuration, err := util.ParseDuration(webPushDeliveryRetentionDurationStr)
+	if err != nil {
+		return fmt.Errorf("invalid web push delivery retention duration: %s", webPushDeliveryRetentionDurationStr)
+	}
 	banWindow, err := util.ParseDuration(banWindowStr)
 	if err != nil {
 		return fmt.Errorf("invalid ban window: %s", banWindowStr)
@@ -352,6 +364,10 @@ func execServe(c *cli.Context) error {
 		return errors.New("cannot set firebase-key-file, support for Firebase is not available (nofirebase)")
 	} else if webPushPublicKey != "" && (webPushPrivateKey == "" || (webPushFile == "" && databaseURL == "") || webPushEmailAddress == "" || baseURL == "") {
 		return errors.New("if web push is enabled, web-push-private-key, web-push-public-key, web-push-file (or database-url), web-push-email-address, and base-url should be set. run 'ntfy webpush keys' to generate keys")
+	} else if webPushDeliveryInterval < 5*time.Second {
+		return errors.New("web push delivery interval cannot be lower than five seconds")
+	} else if webPushDeliveryRetentionDuration <= 0 {
+		return errors.New("web push delivery retention duration must be greater than zero")
 	} else if keepaliveInterval < 5*time.Second {
 		return errors.New("keepalive interval cannot be lower than five seconds")
 	} else if managerInterval < 5*time.Second {
@@ -595,6 +611,8 @@ func execServe(c *cli.Context) error {
 	conf.WebPushStartupQueries = webPushStartupQueries
 	conf.WebPushExpiryDuration = webPushExpiryDuration
 	conf.WebPushExpiryWarningDuration = webPushExpiryWarningDuration
+	conf.WebPushDeliveryInterval = webPushDeliveryInterval
+	conf.WebPushDeliveryRetentionDuration = webPushDeliveryRetentionDuration
 	conf.BuildVersion = c.App.Version
 	conf.BuildDate = maybeFromMetadata(c.App.Metadata, MetadataKeyDate)
 	conf.BuildCommit = maybeFromMetadata(c.App.Metadata, MetadataKeyCommit)

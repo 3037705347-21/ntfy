@@ -29,3 +29,7 @@ func (s *Server) publishToWebPushEndpoints(v *visitor, m *model.Message) {
 func (s *Server) pruneAndNotifyWebPushSubscriptions() {
 	// Nothing to see here
 }
+
+func (s *Server) runWebPushDeliveryWorker() {
+	// Nothing to see here
+}

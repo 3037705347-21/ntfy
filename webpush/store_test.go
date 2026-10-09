@@ -372,3 +372,265 @@ func TestStoreRemoveExpired(t *testing.T) {
 		require.Len(t, subs, 0)
 	})
 }
+
+func subscriptionsForTestTopic(t *testing.T, store *webpush.Store, topic string) []*webpush.Subscription {
+	t.Helper()
+	subs, err := store.SubscriptionsForTopic(topic)
+	require.Nil(t, err)
+	return subs
+}
+
+func enqueueTestDelivery(t *testing.T, store *webpush.Store, messageID, topic string, expiresAt int64, subs []*webpush.Subscription) {
+	t.Helper()
+	require.Nil(t, store.EnqueueDeliveries(messageID, topic, []byte("payload-"+messageID), expiresAt, subs))
+}
+
+// TestStoreDeliveryEnqueueAndPending covers the basic ledger lifecycle: enqueue rows for each
+// subscription, claim them, and confirm they drop out of the pending queue once claimed.
+func TestStoreDeliveryEnqueueAndPending(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, store *webpush.Store) {
+		require.Nil(t, store.UpsertSubscription(testWebPushEndpoint+"0", "auth-key", "p256dh-key", "u_1234", netip.MustParseAddr("1.2.3.4"), []string{"topic1"}))
+		require.Nil(t, store.UpsertSubscription(testWebPushEndpoint+"1", "auth-key", "p256dh-key", "u_1234", netip.MustParseAddr("1.2.3.4"), []string{"topic1"}))
+		subs := subscriptionsForTestTopic(t, store, "topic1")
+		require.Len(t, subs, 2)
+
+		now := time.Now().Unix()
+		enqueueTestDelivery(t, store, "m_aaaaaaaaaaaa", "topic1", now+3600, subs)
+
+		pending, err := store.PendingDeliveries(now, 100)
+		require.Nil(t, err)
+		require.Len(t, pending, 2)
+		for _, d := range pending {
+			require.Equal(t, "m_aaaaaaaaaaaa", d.MessageID)
+			require.Equal(t, "topic1", d.Topic)
+			require.Equal(t, []byte("payload-m_aaaaaaaaaaaa"), d.Payload)
+			require.Equal(t, 0, d.Attempts)
+			require.NotEmpty(t, d.Subscription.Endpoint)
+		}
+
+		// Re-enqueueing the same message must be a no-op (dedup anchor)
+		enqueueTestDelivery(t, store, "m_aaaaaaaaaaaa", "topic1", now+3600, subs)
+		pending, err = store.PendingDeliveries(now, 100)
+		require.Nil(t, err)
+		require.Len(t, pending, 2)
+
+		// Claim one row: attempts increments and the row is invisible while in flight
+		claimed, err := store.ClaimDelivery(pending[0].ID, now, now+120)
+		require.Nil(t, err)
+		require.True(t, claimed)
+		claimedAgain, err := store.ClaimDelivery(pending[0].ID, now, now+120)
+		require.Nil(t, err)
+		require.False(t, claimedAgain)
+		pending, err = store.PendingDeliveries(now, 100)
+		require.Nil(t, err)
+		require.Len(t, pending, 1)
+
+		// After the visibility timeout passes (e.g. the claiming process died), the row is due again
+		recovered, err := store.PendingDeliveries(now+121, 100)
+		require.Nil(t, err)
+		require.Len(t, recovered, 2)
+	})
+}
+
+// TestStoreDeliveryDeliveredIsFinal verifies that a 2xx confirmation moves the row to a terminal
+// delivered state from which it is never returned for sending again.
+func TestStoreDeliveryDeliveredIsFinal(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, store *webpush.Store) {
+		require.Nil(t, store.UpsertSubscription(testWebPushEndpoint, "auth-key", "p256dh-key", "u_1234", netip.MustParseAddr("1.2.3.4"), []string{"topic1"}))
+		subs := subscriptionsForTestTopic(t, store, "topic1")
+		now := time.Now().Unix()
+		enqueueTestDelivery(t, store, "m_bbbbbbbbbbbb", "topic1", now+3600, subs)
+
+		pending, err := store.PendingDeliveries(now, 100)
+		require.Nil(t, err)
+		require.Len(t, pending, 1)
+		require.True(t, pending[0].Subscription.Endpoint == testWebPushEndpoint)
+
+		claimed, err := store.ClaimDelivery(pending[0].ID, now, now+120)
+		require.Nil(t, err)
+		require.True(t, claimed)
+		require.Nil(t, store.MarkDeliveryDelivered(pending[0].ID, now+1))
+
+		delivery, err := store.Delivery(testWebPushEndpoint, "m_bbbbbbbbbbbb")
+		require.Nil(t, err)
+		require.Equal(t, webpush.DeliveryStatusDelivered, delivery.Status)
+		require.Equal(t, 1, delivery.Attempts)
+		require.Equal(t, now+1, delivery.DeliveredAt)
+
+		// Delivered rows are never pending again, even far in the future
+		recovered, err := store.PendingDeliveries(now+100000, 100)
+		require.Nil(t, err)
+		require.Empty(t, recovered)
+
+		// A late duplicate claim does nothing
+		claimed, err = store.ClaimDelivery(pending[0].ID, now+100000, now+100120)
+		require.Nil(t, err)
+		require.False(t, claimed)
+	})
+}
+
+// TestStoreDeliveryRetryAndDead verifies retry backoff scheduling and the terminal dead state.
+func TestStoreDeliveryRetryAndDead(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, store *webpush.Store) {
+		require.Nil(t, store.UpsertSubscription(testWebPushEndpoint, "auth-key", "p256dh-key", "u_1234", netip.MustParseAddr("1.2.3.4"), []string{"topic1"}))
+		subs := subscriptionsForTestTopic(t, store, "topic1")
+		now := time.Now().Unix()
+		enqueueTestDelivery(t, store, "m_cccccccccccc", "topic1", now+3600, subs)
+
+		pending, err := store.PendingDeliveries(now, 100)
+		require.Nil(t, err)
+		require.Len(t, pending, 1)
+		id := pending[0].ID
+
+		// First attempt fails retryably: scheduled into the future
+		claimed, err := store.ClaimDelivery(id, now, now+120)
+		require.Nil(t, err)
+		require.True(t, claimed)
+		require.Nil(t, store.MarkDeliveryRetry(id, now+1, now+60, "connection refused"))
+		pending, err = store.PendingDeliveries(now+30, 100)
+		require.Nil(t, err)
+		require.Empty(t, pending)
+		pending, err = store.PendingDeliveries(now+61, 100)
+		require.Nil(t, err)
+		require.Len(t, pending, 1)
+		require.Equal(t, 1, pending[0].Attempts)
+		require.Equal(t, "connection refused", storeDeliveryLastError(t, store, testWebPushEndpoint, "m_cccccccccccc"))
+
+		// Second attempt gives up: dead rows leave the queue
+		claimed, err = store.ClaimDelivery(id, now+61, now+181)
+		require.Nil(t, err)
+		require.True(t, claimed)
+		require.Nil(t, store.MarkDeliveryDead(id, now+62, "max attempts reached"))
+		pending, err = store.PendingDeliveries(now+100000, 100)
+		require.Nil(t, err)
+		require.Empty(t, pending)
+		delivery, err := store.Delivery(testWebPushEndpoint, "m_cccccccccccc")
+		require.Nil(t, err)
+		require.Equal(t, webpush.DeliveryStatusDead, delivery.Status)
+		require.Equal(t, 2, delivery.Attempts)
+	})
+}
+
+func storeDeliveryLastError(t *testing.T, store *webpush.Store, endpoint, messageID string) string {
+	t.Helper()
+	delivery, err := store.Delivery(endpoint, messageID)
+	require.Nil(t, err)
+	return delivery.LastError
+}
+
+// TestStoreDeliveryExpire marks pending rows dead once their message passed its expiry horizon.
+func TestStoreDeliveryExpire(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, store *webpush.Store) {
+		require.Nil(t, store.UpsertSubscription(testWebPushEndpoint, "auth-key", "p256dh-key", "u_1234", netip.MustParseAddr("1.2.3.4"), []string{"topic1"}))
+		subs := subscriptionsForTestTopic(t, store, "topic1")
+		now := time.Now().Unix()
+		enqueueTestDelivery(t, store, "m_dddddddddddd", "topic1", now-1, subs) // Already expired
+
+		affected, err := store.ExpirePendingDeliveries(now)
+		require.Nil(t, err)
+		require.Equal(t, int64(1), affected)
+		delivery, err := store.Delivery(testWebPushEndpoint, "m_dddddddddddd")
+		require.Nil(t, err)
+		require.Equal(t, webpush.DeliveryStatusDead, delivery.Status)
+
+		// Idempotent: nothing to expire on the next manager run
+		affected, err = store.ExpirePendingDeliveries(now)
+		require.Nil(t, err)
+		require.Equal(t, int64(0), affected)
+	})
+}
+
+// TestStoreDeliverySubscriptionCascade verifies that deleting or expiring a subscription also
+// removes its delivery rows and, once no rows remain, the stored payload.
+func TestStoreDeliverySubscriptionCascade(t *testing.T) {
+	t.Run("by_endpoint", func(t *testing.T) {
+		forEachBackend(t, func(t *testing.T, store *webpush.Store) {
+			require.Nil(t, store.UpsertSubscription(testWebPushEndpoint+"0", "auth-key", "p256dh-key", "u_1234", netip.MustParseAddr("1.2.3.4"), []string{"topic1"}))
+			require.Nil(t, store.UpsertSubscription(testWebPushEndpoint+"1", "auth-key", "p256dh-key", "u_5678", netip.MustParseAddr("9.9.9.9"), []string{"topic1"}))
+			subs := subscriptionsForTestTopic(t, store, "topic1")
+			now := time.Now().Unix()
+			enqueueTestDelivery(t, store, "m_eeeeeeeeeeee", "topic1", now+3600, subs)
+
+			require.Nil(t, store.RemoveSubscriptionsByEndpoint(testWebPushEndpoint+"0"))
+			_, err := store.Delivery(testWebPushEndpoint+"0", "m_eeeeeeeeeeee")
+			require.ErrorIs(t, err, webpush.ErrWebPushDeliveryNotFound)
+			// The other subscription's row survives
+			_, err = store.Delivery(testWebPushEndpoint+"1", "m_eeeeeeeeeeee")
+			require.Nil(t, err)
+
+			// Removing the remaining row orphans the payload row, which is then swept
+			require.Nil(t, store.RemoveSubscriptionsByEndpoint(testWebPushEndpoint+"1"))
+			orphaned, err := store.RemoveOrphanedDeliveryMessages()
+			require.Nil(t, err)
+			require.Equal(t, int64(1), orphaned)
+		})
+	})
+	t.Run("by_user_id", func(t *testing.T) {
+		forEachBackend(t, func(t *testing.T, store *webpush.Store) {
+			require.Nil(t, store.UpsertSubscription(testWebPushEndpoint, "auth-key", "p256dh-key", "u_1234", netip.MustParseAddr("1.2.3.4"), []string{"topic1"}))
+			subs := subscriptionsForTestTopic(t, store, "topic1")
+			enqueueTestDelivery(t, store, "m_ffffffffffff", "topic1", time.Now().Unix()+3600, subs)
+			require.Nil(t, store.RemoveSubscriptionsByUserID("u_1234"))
+			_, err := store.Delivery(testWebPushEndpoint, "m_ffffffffffff")
+			require.ErrorIs(t, err, webpush.ErrWebPushDeliveryNotFound)
+		})
+	})
+	t.Run("by_age", func(t *testing.T) {
+		forEachBackend(t, func(t *testing.T, store *webpush.Store) {
+			require.Nil(t, store.UpsertSubscription(testWebPushEndpoint, "auth-key", "p256dh-key", "u_1234", netip.MustParseAddr("1.2.3.4"), []string{"topic1"}))
+			subs := subscriptionsForTestTopic(t, store, "topic1")
+			enqueueTestDelivery(t, store, "m_111111111111", "topic1", time.Now().Unix()+3600, subs)
+			require.Nil(t, store.SetSubscriptionUpdatedAt(testWebPushEndpoint, time.Now().Add(-10*24*time.Hour).Unix()))
+			require.Nil(t, store.RemoveExpiredSubscriptions(9*24*time.Hour))
+			_, err := store.Delivery(testWebPushEndpoint, "m_111111111111")
+			require.ErrorIs(t, err, webpush.ErrWebPushDeliveryNotFound)
+		})
+	})
+}
+
+// TestStoreDeliveryRetentionSweep deletes old terminal rows but keeps fresh and pending ones.
+func TestStoreDeliveryRetentionSweep(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, store *webpush.Store) {
+		require.Nil(t, store.UpsertSubscription(testWebPushEndpoint+"0", "auth-key", "p256dh-key", "u_1234", netip.MustParseAddr("1.2.3.4"), []string{"topic1"}))
+		require.Nil(t, store.UpsertSubscription(testWebPushEndpoint+"1", "auth-key", "p256dh-key", "u_1234", netip.MustParseAddr("1.2.3.4"), []string{"topic1"}))
+		subs0 := subscriptionsForTestTopic(t, store, "topic1")
+		now := time.Now().Unix()
+
+		// One delivered row, one still-pending row
+		enqueueTestDelivery(t, store, "m_222222222222", "topic1", now+3600, subs0[:1])
+		pending, err := store.PendingDeliveries(now, 100)
+		require.Nil(t, err)
+		require.Len(t, pending, 1)
+		require.True(t, mustClaim(t, store, pending[0].ID, now))
+		require.Nil(t, store.MarkDeliveryDelivered(pending[0].ID, now))
+
+		enqueueTestDelivery(t, store, "m_333333333333", "topic1", now+3600, subs0[1:])
+
+		// Nothing older than a future cutoff... everything is younger than now+10s except nothing
+		removed, err := store.RemoveOldDeliveries(now-10, 100)
+		require.Nil(t, err)
+		require.Equal(t, int64(0), removed)
+
+		// A cutoff past the delivered row's update removes it but leaves the pending row
+		removed, err = store.RemoveOldDeliveries(now+10, 100)
+		require.Nil(t, err)
+		require.Equal(t, int64(1), removed)
+		_, err = store.Delivery(testWebPushEndpoint+"0", "m_222222222222")
+		require.ErrorIs(t, err, webpush.ErrWebPushDeliveryNotFound)
+		pending, err = store.PendingDeliveries(now, 100)
+		require.Nil(t, err)
+		require.Len(t, pending, 1)
+
+		// The delivered message payload is now orphaned; the pending one is not
+		orphaned, err := store.RemoveOrphanedDeliveryMessages()
+		require.Nil(t, err)
+		require.Equal(t, int64(1), orphaned)
+	})
+}
+
+func mustClaim(t *testing.T, store *webpush.Store, id string, now int64) bool {
+	t.Helper()
+	claimed, err := store.ClaimDelivery(id, now, now+120)
+	require.Nil(t, err)
+	return claimed
+}

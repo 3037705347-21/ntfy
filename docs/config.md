@@ -1668,6 +1668,12 @@ a database to keep track of the browser's subscriptions, and an admin email addr
 - `web-push-startup-queries` is an optional list of queries to run on startup`
 - `web-push-expiry-warning-duration` defines the duration after which unused subscriptions are sent a warning (default is `55d`)
 - `web-push-expiry-duration` defines the duration after which unused subscriptions will expire (default is `60d`)
+- `web-push-delivery-interval` defines how often unconfirmed web push messages are retried after push-service failures; pending messages are also resumed immediately after a server restart (default is `1m`)
+- `web-push-delivery-retention-duration` defines how long confirmed or permanently-failed delivery records are kept before they are pruned (default is `30d`)
+
+Every message is recorded per subscriber in a persistent delivery ledger: messages that fail with a
+retryable error (connection errors, `429`/`5xx`) are retried with backoff and resumed after a
+restart, while messages confirmed with a `2xx` are never pushed again.
 
 Alternatively, you can use PostgreSQL instead of SQLite by setting `database-url`
 (see [PostgreSQL database](#postgresql)).
@@ -2435,6 +2441,8 @@ variable before running the `ntfy` command (e.g. `export NTFY_LISTEN_HTTP=:80`).
 | `web-push-startup-queries`                 | `NTFY_WEB_PUSH_STARTUP_QUERIES`                 | *string*                                            | -                 | Web Push: SQL queries to run against subscription database at startup                                                                                                                                                                   |
 | `web-push-expiry-duration`                 | `NTFY_WEB_PUSH_EXPIRY_DURATION`                 | *duration*                                          | 60d               | Web Push: Duration after which a subscription is considered stale and will be deleted. This is to prevent stale subscriptions.                                                                                                          |
 | `web-push-expiry-warning-duration`         | `NTFY_WEB_PUSH_EXPIRY_WARNING_DURATION`         | *duration*                                          | 55d               | Web Push: Duration after which a warning is sent to subscribers that their subscription will expire soon. This is to prevent stale subscriptions.                                                                                       |
+| `web-push-delivery-interval`               | `NTFY_WEB_PUSH_DELIVERY_INTERVAL`               | *duration*                                          | 1m                | Web Push: Interval at which unconfirmed messages are retried; pending messages are also resumed immediately after a restart.                                                                                                            |
+| `web-push-delivery-retention-duration`     | `NTFY_WEB_PUSH_DELIVERY_RETENTION_DURATION`     | *duration*                                          | 30d               | Web Push: Time after which confirmed or permanently-failed delivery ledger records are pruned.                                                                                                                                          |
 | `log-format`                               | `NTFY_LOG_FORMAT`                               | *string*                                            | `text`            | Defines the output format, can be text or json                                                                                                                                                                                          |
 | `log-file`                                 | `NTFY_LOG_FILE`                                 | *string*                                            | -                 | Defines the filename to write logs to. If this is not set, ntfy logs to stderr                                                                                                                                                          |
 | `log-level`                                | `NTFY_LOG_LEVEL`                                | *string*                                            | `info`            | Defines the default log level, can be one of trace, debug, info, warn or error                                                                                                                                                          |
@@ -2546,5 +2554,7 @@ OPTIONS:
    --web-push-startup-queries value, --web_push_startup_queries value                                                     queries run when the web push database is initialized [$NTFY_WEB_PUSH_STARTUP_QUERIES]
    --web-push-expiry-duration value, --web_push_expiry_duration value                                                     automatically expire unused subscriptions after this time (default: "60d") [$NTFY_WEB_PUSH_EXPIRY_DURATION]
    --web-push-expiry-warning-duration value, --web_push_expiry_warning_duration value                                     send web push warning notification after this time before expiring unused subscriptions (default: "55d") [$NTFY_WEB_PUSH_EXPIRY_WARNING_DURATION]
+   --web-push-delivery-interval value, --web_push_delivery_interval value                                                 how often to retry web push messages that have not been confirmed by the push service (default: "1m") [$NTFY_WEB_PUSH_DELIVERY_INTERVAL]
+   --web-push-delivery-retention-duration value, --web_push_delivery_retention_duration value                             how long to keep delivered or failed-for-good web push delivery records before pruning them (default: "30d") [$NTFY_WEB_PUSH_DELIVERY_RETENTION_DURATION]
    --help, -h 
 ```

@@ -40,8 +40,10 @@ var (
 
 // Defines default Web Push settings
 const (
-	DefaultWebPushExpiryWarningDuration = 55 * 24 * time.Hour
-	DefaultWebPushExpiryDuration        = 60 * 24 * time.Hour
+	DefaultWebPushExpiryWarningDuration     = 55 * 24 * time.Hour
+	DefaultWebPushExpiryDuration            = 60 * 24 * time.Hour
+	DefaultWebPushDeliveryInterval          = time.Minute
+	DefaultWebPushDeliveryRetentionDuration = 30 * 24 * time.Hour
 )
 
 // Defines default abuse ban-feed settings (see BanFile, BanWindow, BanThreshold, BanWeights)
@@ -232,6 +234,8 @@ type Config struct {
 	WebPushStartupQueries                string
 	WebPushExpiryDuration                time.Duration
 	WebPushExpiryWarningDuration         time.Duration
+	WebPushDeliveryInterval              time.Duration // How often the delivery worker retries unconfirmed web push messages
+	WebPushDeliveryRetentionDuration     time.Duration // How long delivered/dead ledger rows are kept before being pruned
 	BanFile                              string        // Abuse ban-feed: file that fail2ban tails; empty string disables the feature
 	BanWindow                            time.Duration // Abuse ban-feed: rolling window over which weighted strikes are counted
 	BanThreshold                         int           // Abuse ban-feed: weighted strikes per window before a prefix is banned
@@ -345,6 +349,8 @@ func NewConfig() *Config {
 		WebPushEmailAddress:                  "",
 		WebPushExpiryDuration:                DefaultWebPushExpiryDuration,
 		WebPushExpiryWarningDuration:         DefaultWebPushExpiryWarningDuration,
+		WebPushDeliveryInterval:              DefaultWebPushDeliveryInterval,
+		WebPushDeliveryRetentionDuration:     DefaultWebPushDeliveryRetentionDuration,
 		BanFile:                              "",
 		BanWindow:                            DefaultBanWindow,
 		BanThreshold:                         DefaultBanThreshold,

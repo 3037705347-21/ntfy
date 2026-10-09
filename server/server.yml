@@ -266,6 +266,10 @@
 # - web-push-startup-queries is an optional list of queries to run on startup
 # - web-push-expiry-warning-duration defines the duration after which unused subscriptions are sent a warning (default is 55d)
 # - web-push-expiry-duration defines the duration after which unused subscriptions will expire (default is 60d)
+# - web-push-delivery-interval defines how often unconfirmed web push messages are retried after failures;
+#   a persistent delivery ledger also resumes pending messages right after a restart (default is 1m)
+# - web-push-delivery-retention-duration defines how long confirmed or permanently-failed delivery records
+#   are kept in the ledger before they are pruned (default is 30d)
 #
 # web-push-public-key:
 # web-push-private-key:
@@ -274,6 +278,8 @@
 # web-push-startup-queries:
 # web-push-expiry-warning-duration: "55d"
 # web-push-expiry-duration: "60d"
+# web-push-delivery-interval: "1m"
+# web-push-delivery-retention-duration: "30d"
 
 # If enabled, ntfy can perform voice calls via Twilio via the "X-Call" header.
 #
